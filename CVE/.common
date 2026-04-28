@@ -1,0 +1,18 @@
+
+find_and_delete()
+{
+	local PATTERN="${1}"
+	local VAR_PREFIX="${2}"
+	shift 2
+
+	local C=0
+	local VAR_NAMES=""
+	while read JAR ; do
+		DIR="${JAR%/*}"
+		VAR="${VAR_PREFIX}_$(( ++C ))"
+		echo "declare -gx ${VAR}=${DIR@Q} ;"
+		[ -n "${VAR_NAMES}" ] && VAR_NAMES+=","
+		VAR_NAMES+="${VAR}"
+	done < <(find "${@}" -type f -name "${PATTERN}" -print -delete | sort -u)
+	echo "export ARTIFACT_DIRS=${VAR_NAMES@Q} ;"
+}

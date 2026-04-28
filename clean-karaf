@@ -1,0 +1,102 @@
+#!/bin/bash
+
+set -euo pipefail
+. /.functions
+
+render_temporary_sum()
+{
+	local VER="${1}"
+	local DIR="${2}"
+
+	local RC=0
+
+	local SUM=""
+	SUM="$(find "${DIR}" -type f | sort | xargs cat | sha256sum | awk '{ print $1 }')" || RC=${?}
+	if [ ${RC} -ne 0 ] ; then
+		echo -n "Failed to compute the component checksum from [${DIR}] (rc=${RC}): ${SUM}"
+		return ${RC}
+	fi
+
+	local OUT=""
+	OUT="$(jq -n --arg VER "${VER}" --arg SUM "${SUM}" --arg TS "$(timestamp)" '{ "version": $VER, "checksum": $SUM, "timestamp": $TS }' 2>&1)" || RC=${?}
+	echo -n "${OUT}"
+	return ${RC}
+}
+
+verify_karaf_contents()
+{
+	local OLD_SUM_FILE="${1}"
+	local VER="${2}"
+	local NEW_SUM="${3}"
+
+	if ! is_file_readable "${OLD_SUM_FILE}" ; then
+		err "No checksum file found at [${OLD_SUM_FILE}] - must assume a mismatch!"
+		return 1
+	fi
+
+	local OLD_VER=""
+	local OLD_SUM=""
+
+	OLD_VER="$(jq -r .version "${OLD_SUM_FILE}" 2>&1)" || fail "Failed to parse the Karaf version data from [${OLD_SUM_FILE}] (rc=${?}): ${OLD_VER}"
+	if [ -z "${OLD_VER}" ] ; then
+		err "Unable to determine which version of Pentaho the old Karaf data is for!"
+		return 1
+	fi
+	if [ "${VER}" != "${OLD_VER}" ] ; then
+		err "The Karaf persistence data was created for ${OLD_VER}, but this is version ${VER}!"
+		return 1
+	fi
+
+	OLD_SUM="$(jq -r .checksum "${OLD_SUM_FILE}" 2>&1)" || fail "Failed to parse the Karaf checksum data from [${OLD_SUM_FILE}] (rc=${?}): ${OLD_SUM}"
+	if [ -z "${OLD_SUM}" ] ; then
+		err "Unable to determine the Karaf component checksum the current data was built from!"
+		return 1
+	fi
+	if [ "${NEW_SUM}" != "${OLD_SUM}" ] ; then
+		err "The Karaf persistence data was created from a different source than this container image provides:"
+		err "[${OLD_SUM}] != [${NEW_SUM}]"
+		return 1
+	fi
+
+	return 0
+}
+
+cleanup()
+{
+	rm -rf "${KARAF_SUM_TMP}" &>/dev/null || true
+}
+
+commit()
+{
+	local OUT=""
+	OUT="$(mv -v "${KARAF_SUM_TMP}" "${KARAF_SUM}" 2>&1)" || fail "Failed to move the temporary checksum data into its final location (rc=${?}): ${OUT}"
+	quit "${@}"
+}
+
+set_or_default BASE_DIR "/app"
+
+set_or_default PENTAHO_HOME "${BASE_DIR}/pentaho"
+set_or_default PENTAHO_SERVER "${PENTAHO_HOME}/pentaho-server"
+set_or_default KARAF_SRC_DIR "${PENTAHO_SERVER}/pentaho-solutions/system/karaf"
+
+set_or_default DATA_DIR "${BASE_DIR}/data"
+set_or_default KARAF_DIR "${DATA_DIR}/karaf"
+
+KARAF_SUM="${DATA_DIR}/.karaf.sum"
+NEW_SUM_FILE="$(render_temporary_sum "${PENTAHO_VERSION}" "${KARAF_SRC_DIR}" 2>&1)" || fail "Failed to render a temporary checksum file (rc=${?}): ${NEW_SUM_FILE}"
+
+KARAF_SUM_TMP="$(mktemp "${KARAF_SUM}.XXXXXXXX" 2>&1)" || fail "The persistence directory for the checksum file does not appear to be accessible (rc=${?}): ${KARAF_SUM_TMP}"
+trap cleanup EXIT
+echo -n "${NEW_SUM_FILE}" > "${KARAF_SUM_TMP}"
+
+is_dir "${KARAF_DIR}" || commit "No Karaf persistence data found"
+
+# Here we just quit b/c the data is current, including checksums
+NEW_SUM="$(jq -r .checksum <<< "${NEW_SUM_FILE}" 2>&1)" || fail "Failed to parse the component checksum from the new component data (rc=${?}): ${NEW_SUM}"
+verify_karaf_contents "${KARAF_SUM}" "${PENTAHO_VERSION}" "${NEW_SUM}" && quit "The Karaf persistence data is current!"
+
+err "The Karaf persistence data must be deleted!"
+
+rm -rf "${KARAF_SUM}" "${KARAF_DIR}" &>/dev/null || true
+is_dir "${KARAF_DIR}" && fail "The Karaf persistence data was not deleted ... please delete it manually!"
+commit "The Karaf persistence data was deleted!"

@@ -1,0 +1,9 @@
+#!/bin/bash
+
+set -euo pipefail
+. /.functions
+
+require_dir "${PENTAHO_SERVER}"
+require_dir "${PENTAHO_TOMCAT}"
+
+execute "${PENTAHO_SERVER}/start-pentaho.sh" "${@}"
