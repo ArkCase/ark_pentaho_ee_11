@@ -255,8 +255,7 @@ COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" --chmod=0644 repository.spring.x
 COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" --chmod=0644 liquibase.properties "${LB_DIR}/"
 COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" "sql/${PENTAHO_VERSION}" "${LB_DIR}/pentaho/"
 
-COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" --chmod=0755 CVE /CVE
-RUN apply-fixes /CVE
+RUN --mount=type=bind,source=CVE,target=/CVE apply-fixes /CVE
 
 # This is for STIG compliance
 USER root
