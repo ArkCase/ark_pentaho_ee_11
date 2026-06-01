@@ -136,6 +136,15 @@ JAVA_OPTS+=" --add-opens=java.base/java.nio=ALL-UNNAMED"
 JAVA_OPTS+=" --add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED"
 export JAVA_OPTS
 
+#
+# If we want to enable JavaScript for reports, we do the change
+#
+if as_boolean "${PENTAHO_REPORTS_JAVASCRIPT:-false}" ; then
+	warn "Enabling JavaScript within Pentaho reports (beware of PPP-3817 / CVE-2023-3517)"
+	OUT="$(sed -ibak -e 's;^\s*#\s*\(.*JavaScriptRule\s*=\s*.*\)$;\1;ig' "${PENTAHO_WEBAPP}/WEB-INF/classes/org/pentaho/platform/engine/services/runtime/plugins.properties" 2>&1)" || fail "Failed to edit the plugin.properties (rc=${?}): ${OUT}"
+	ok "Reports JavaScript enabled!"
+fi
+
 ###################################################################
 # LAUNCH PENTAHO                                                  #
 ###################################################################
