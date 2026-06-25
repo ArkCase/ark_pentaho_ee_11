@@ -26,14 +26,10 @@ ARG DISRUPTOR="4.0.0"
 ARG DISRUPTOR_SRC="com.lmax:disruptor:${DISRUPTOR}"
 ARG MARIADB_DRIVER="3.5.7"
 ARG MARIADB_DRIVER_SRC="org.mariadb.jdbc:mariadb-java-client:${MARIADB_DRIVER}"
-ARG MSSQL_DRIVER="13.2.1.jre11"
-ARG MSSQL_DRIVER_SRC="com.microsoft.sqlserver:mssql-jdbc:${MSSQL_DRIVER}"
 ARG MYSQL_DRIVER="9.5.0"
 ARG MYSQL_DRIVER_SRC="com.mysql:mysql-connector-j:${MYSQL_DRIVER}"
 ARG MYSQL_LEGACY_DRIVER="1.0.0"
 ARG MYSQL_LEGACY_DRIVER_SRC="com.armedia.mysql:mysql-legacy-driver:${MYSQL_LEGACY_DRIVER}:jar"
-ARG ORACLE_DRIVER="23.26.0.0.0"
-ARG ORACLE_DRIVER_SRC="com.oracle.database.jdbc:ojdbc17:${ORACLE_DRIVER}"
 ARG POSTGRES_DRIVER="42.7.11"
 ARG POSTGRES_DRIVER_SRC="org.postgresql:postgresql:${POSTGRES_DRIVER}"
 
@@ -90,10 +86,8 @@ ARG LB_VER
 
 ARG DISRUPTOR_SRC
 ARG MARIADB_DRIVER_SRC
-ARG MSSQL_DRIVER_SRC
 ARG MYSQL_DRIVER_SRC
 ARG MYSQL_LEGACY_DRIVER_SRC
-ARG ORACLE_DRIVER_SRC
 ARG POSTGRES_DRIVER_SRC
 
 ARG PENTAHO_USER
@@ -187,10 +181,8 @@ RUN --mount=type=cache,from=src,target=/src,id=artifacts,ro=true \
       && \
     mvn-get "${DISRUPTOR_SRC}" "${PENTAHO_TOMCAT}/lib" && \
     mvn-get "${MARIADB_DRIVER_SRC}" "${PENTAHO_TOMCAT}/lib" && \
-    mvn-get "${MSSQL_DRIVER_SRC}" "${PENTAHO_TOMCAT}/lib" && \
     mvn-get "${MYSQL_DRIVER_SRC}" "${PENTAHO_TOMCAT}/lib" && \
     mvn-get "${MYSQL_LEGACY_DRIVER_SRC}" "${ARKCASE_MVN_REPO}" "${PENTAHO_TOMCAT}/lib" && \
-    mvn-get "${ORACLE_DRIVER_SRC}" "${PENTAHO_TOMCAT}/lib" && \
     mvn-get "${POSTGRES_DRIVER_SRC}" "${PENTAHO_TOMCAT}/lib" && \
     mvn-get "${ARKCASE_PREAUTH_SRC}" "${ARKCASE_MVN_REPO}" "${PENTAHO_TOMCAT}/webapps/pentaho/WEB-INF/lib" && \
     rm -fv \
@@ -199,10 +191,8 @@ RUN --mount=type=cache,from=src,target=/src,id=artifacts,ro=true \
       && \
     ln -vf \
         "${PENTAHO_TOMCAT}/lib"/mariadb-java-client-*.jar \
-        "${PENTAHO_TOMCAT}/lib"/mssql-jdbc-*.jar \
         "${PENTAHO_TOMCAT}/lib"/mysql-connector-j-*.jar \
         "${PENTAHO_TOMCAT}/lib"/mysql-legacy-driver-*.jar \
-        "${PENTAHO_TOMCAT}/lib"/ojdbc*.jar \
         "${PENTAHO_TOMCAT}/lib"/postgresql-*.jar \
         "${PENTAHO_PDI_LIB}" && \
     find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" -type f -name 'hsqldb-*.jar' -delete && \
@@ -232,17 +222,13 @@ RUN umask 0027 && \
     curl -L --fail "${LB_SRC}" | tar -C "${LB_DIR}" -xzvf - && \
     cd "${LB_DIR}" && \
     rm -fv \
-        internal/lib/mssql-jdbc.jar \
-        internal/lib/ojdbc*.jar \
         internal/lib/mariadb-java-client.jar \
         internal/lib/postgresql.jar \
       && \
     ln -vf \
         "${PENTAHO_TOMCAT}/lib"/mariadb-java-client-*.jar \
-        "${PENTAHO_TOMCAT}/lib"/mssql-jdbc-*.jar \
         "${PENTAHO_TOMCAT}/lib"/mysql-connector-j-*.jar \
         "${PENTAHO_TOMCAT}/lib"/mysql-legacy-driver-*.jar \
-        "${PENTAHO_TOMCAT}/lib"/ojdbc*.jar \
         "${PENTAHO_TOMCAT}/lib"/postgresql-*.jar \
         "internal/lib" && \
     chown -Rvc "${PENTAHO_USER}:${PENTAHO_GROUP}" "${LB_DIR}" && \
