@@ -9,8 +9,8 @@
 ARG FIPS=""
 ARG PUBLIC_REGISTRY="public.ecr.aws"
 ARG PRIVATE_REGISTRY
-ARG VER="11.1.0.0"
-ARG BUILD="214"
+ARG VER="11.0.0.2"
+ARG BUILD="291"
 ARG OS="linux"
 ARG ARCH="amd64"
 ARG PKG="pentaho"
@@ -216,6 +216,16 @@ RUN --mount=type=cache,from=src,target=/src,id=artifacts,ro=true \
         --delete '/web-app/listener[contains(listener-class/text(), "HsqldbStartupListener")]' \
         "${PENTAHO_WEBAPP}/WEB-INF/web.xml" \
       && \
+    export KETTLE_PLUGINS="${PENTAHO_SYSTEM}/kettle/plugins" && \
+    export PDI_PLUGINS="${PENTAHO_PDI_HOME}/data-integration/plugins" && \
+    for DIR in "${KETTLE_PLUGINS}" "${PDI_PLUGINS}" ; do \
+        rm -rvf \
+            "${DIR}/azure-datalake2-vfs" \
+            "${DIR}/azure-sqldb" \
+            "${DIR}/kinesis" \
+            "${DIR}/pdi-jms-plugin" \
+            "${DIR}/pentaho-streaming-jms-plugin" ; \
+    done && \
     rm -rvf "${PENTAHO_INSTALL}"
 
 RUN umask 0027 && \
