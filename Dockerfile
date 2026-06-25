@@ -216,6 +216,8 @@ RUN --mount=type=cache,from=src,target=/src,id=artifacts,ro=true \
             "${DIR}/pdi-jms-plugin" \
             "${DIR}/pentaho-streaming-jms-plugin" ; \
     done && \
+    find "${BASE_DIR}" -type f -name "mssql-jdbc-*.jar" -delete && \
+    find "${BASE_DIR}" -type f -name "ojdbc*.jar" -delete && \
     rm -rvf "${PENTAHO_INSTALL}"
 
 RUN umask 0027 && \
