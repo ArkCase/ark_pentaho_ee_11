@@ -30,7 +30,7 @@ ARG MYSQL_DRIVER="9.5.0"
 ARG MYSQL_DRIVER_SRC="com.mysql:mysql-connector-j:${MYSQL_DRIVER}"
 ARG MYSQL_LEGACY_DRIVER="1.0.0"
 ARG MYSQL_LEGACY_DRIVER_SRC="com.armedia.mysql:mysql-legacy-driver:${MYSQL_LEGACY_DRIVER}:jar"
-ARG POSTGRES_DRIVER="42.7.11"
+ARG POSTGRES_DRIVER="42.7.12"
 ARG POSTGRES_DRIVER_SRC="org.postgresql:postgresql:${POSTGRES_DRIVER}"
 
 ARG ARKCASE_MVN_REPO="https://nexus.armedia.com/repository/arkcase"
