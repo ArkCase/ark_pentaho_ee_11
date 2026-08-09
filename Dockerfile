@@ -212,6 +212,7 @@ RUN --mount=type=cache,from=src,target=/src,id=artifacts,ro=true \
         rm -rvf \
             "${DIR}/azure-datalake2-vfs" \
             "${DIR}/azure-sqldb" \
+            "${DIR}/google-bigquery" \
             "${DIR}/kinesis" \
             "${DIR}/pdi-jms-plugin" \
             "${DIR}/pentaho-streaming-jms-plugin" ; \
