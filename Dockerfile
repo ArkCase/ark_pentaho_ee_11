@@ -215,6 +215,7 @@ RUN --mount=type=cache,from=src,target=/src,id=artifacts,ro=true \
             "${DIR}/google-bigquery" \
             "${DIR}/kinesis" \
             "${DIR}/pdi-jms-plugin" \
+            "${DIR}/pentaho-ee-streaming-amqp-plugin" \
             "${DIR}/pentaho-streaming-jms-plugin" ; \
     done && \
     find "${BASE_DIR}" -type f -name "mssql-jdbc-*.jar" -delete && \
