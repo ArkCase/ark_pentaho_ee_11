@@ -149,6 +149,8 @@ ENV HOME="${PENTAHO_HOME}"
 
 # Install Pentaho Server & Plugins
 RUN --mount=type=cache,from=src,target=/src,id=artifacts,ro=true \
+    --mount=type=secret,uid=${PENTAHO_UID},gid=${PENTAHO_GID},id=mvn_get_auth \
+    . /run/secrets/mvn_get_auth && \
     umask 0027 && \
     export PENTAHO_INSTALL="${PENTAHO_HOME}/install" && \
     mkdir -p "${PENTAHO_INSTALL}" && \
