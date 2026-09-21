@@ -24,7 +24,7 @@ ARG S3_PATH="arkcase/pentaho/${PENTAHO_VERSION}/enterprise/"
 
 ARG DISRUPTOR="4.0.0"
 ARG DISRUPTOR_SRC="com.lmax:disruptor:${DISRUPTOR}"
-ARG MARIADB_DRIVER="3.5.7"
+ARG MARIADB_DRIVER="3.5.9"
 ARG MARIADB_DRIVER_SRC="org.mariadb.jdbc:mariadb-java-client:${MARIADB_DRIVER}"
 ARG MYSQL_DRIVER="9.5.0"
 ARG MYSQL_DRIVER_SRC="com.mysql:mysql-connector-j:${MYSQL_DRIVER}"
