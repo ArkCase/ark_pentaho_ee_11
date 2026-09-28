@@ -58,7 +58,7 @@ ARG PENTAHO_GID="${PENTAHO_UID}"
 ARG LB_VER="5.0.1"
 ARG LB_SRC="https://github.com/liquibase/liquibase/releases/download/v${LB_VER}/liquibase-${LB_VER}.tar.gz"
 
-FROM amazon/aws-cli:latest AS src
+FROM amazon/aws-cli:latest AS pentaho-artifacts
 
 ARG AWS_REGION
 ARG S3_BUCKET
@@ -147,15 +147,18 @@ COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" --chmod=0640 "server.xml" "loggi
 #
 ENV HOME="${PENTAHO_HOME}"
 
+ARG CVE_FIX_FLAG="/src/ORIGINAL-VERSION"
+
 # Install Pentaho Server & Plugins
-RUN --mount=type=cache,from=src,target=/src,id=artifacts,ro=true \
+RUN --mount=type=bind,target=/src,id=artifacts \
+    --mount=type=cache,from=pentaho-artifacts,target=/s3,id=artifacts,ro=true \
     --mount=type=secret,uid=${PENTAHO_UID},gid=${PENTAHO_GID},id=mvn_get_auth \
     . /run/secrets/mvn_get_auth && \
     umask 0027 && \
     export PENTAHO_INSTALL="${PENTAHO_HOME}/install" && \
     mkdir -p "${PENTAHO_INSTALL}" && \
     export SRC_DIR="${PENTAHO_INSTALL}/pentaho-server-manual-ee-${PENTAHO_SERVER_EE}" && \
-    unzip "/src/artifacts/pentaho-server-manual-ee-${PENTAHO_SERVER_EE}.zip" -d "${PENTAHO_INSTALL}" && \
+    unzip "/s3/artifacts/pentaho-server-manual-ee-${PENTAHO_SERVER_EE}.zip" -d "${PENTAHO_INSTALL}" && \
     unzip "${SRC_DIR}/pentaho-solutions.zip" -d "${PENTAHO_SERVER}" && \
     unzip "${SRC_DIR}/pentaho-data.zip" -d "${PENTAHO_SERVER}" && \
     unzip "${SRC_DIR}/jdbc-distribution-utility.zip" -d "${PENTAHO_HOME}" && \
@@ -164,15 +167,15 @@ RUN --mount=type=cache,from=src,target=/src,id=artifacts,ro=true \
     mkdir -p "${TOMCAT_HOME}/webapps/pentaho" "${TOMCAT_HOME}/webapps/pentaho-style" && \
     unzip "${SRC_DIR}/pentaho.war" -d "${TOMCAT_HOME}/webapps/pentaho" && \
     unzip "${SRC_DIR}/pentaho-style.war" -d "${TOMCAT_HOME}/webapps/pentaho-style" && \
-    unzip "/src/artifacts/ROOT.war" -d "${TOMCAT_HOME}/webapps/ROOT" && \
+    unzip "/s3/artifacts/ROOT.war" -d "${TOMCAT_HOME}/webapps/ROOT" && \
     chmod -R go-w "${TOMCAT_HOME}/webapps/ROOT" && \
     export PENTAHO_SYSTEM="${PENTAHO_SERVER}/pentaho-solutions/system" && \
-    unzip "/src/artifacts/pir-plugin-ee-${PIR_PLUGIN_EE}.zip" -d "${PENTAHO_SYSTEM}" && \
-    unzip "/src/artifacts/paz-plugin-ee-${PAZ_PLUGIN_EE}.zip" -d "${PENTAHO_SYSTEM}" && \
-    unzip "/src/artifacts/pdd-plugin-ee-${PDD_PLUGIN_EE}.zip" -d "${PENTAHO_SYSTEM}" && \
-    unzip "/src/artifacts/pdi-ee-client-${PDI_EE_CLIENT}.zip" -d "${PENTAHO_PDI_HOME}" && \
-    unzip "/src/artifacts/pentaho-server-ee-${PENTAHO_SERVER_EE}.zip" "pentaho-server/*.sh" -x "pentaho-server/*/*" -d "${PENTAHO_HOME}" && \
-    unzip "/src/artifacts/pentaho-server-ee-${PENTAHO_SERVER_EE}.zip" "pentaho-server/tomcat/webapps/sw-style/*" -d "${PENTAHO_HOME}" && \
+    unzip "/s3/artifacts/pir-plugin-ee-${PIR_PLUGIN_EE}.zip" -d "${PENTAHO_SYSTEM}" && \
+    unzip "/s3/artifacts/paz-plugin-ee-${PAZ_PLUGIN_EE}.zip" -d "${PENTAHO_SYSTEM}" && \
+    unzip "/s3/artifacts/pdd-plugin-ee-${PDD_PLUGIN_EE}.zip" -d "${PENTAHO_SYSTEM}" && \
+    unzip "/s3/artifacts/pdi-ee-client-${PDI_EE_CLIENT}.zip" -d "${PENTAHO_PDI_HOME}" && \
+    unzip "/s3/artifacts/pentaho-server-ee-${PENTAHO_SERVER_EE}.zip" "pentaho-server/*.sh" -x "pentaho-server/*/*" -d "${PENTAHO_HOME}" && \
+    unzip "/s3/artifacts/pentaho-server-ee-${PENTAHO_SERVER_EE}.zip" "pentaho-server/tomcat/webapps/sw-style/*" -d "${PENTAHO_HOME}" && \
     find "${PENTAHO_SYSTEM}/default-content" -type f -delete && \
     sed -i 's;docbase=";docBase=";g' "${PENTAHO_TOMCAT}/webapps/pentaho/META-INF/context.xml" && \
     find "${PENTAHO_SERVER}" -type f -iname '*.sh' -exec chmod u=rwx,g=rx,o= '{}' ';' && \
@@ -198,7 +201,7 @@ RUN --mount=type=cache,from=src,target=/src,id=artifacts,ro=true \
         "${PENTAHO_TOMCAT}/lib"/postgresql-*.jar \
         "${PENTAHO_PDI_LIB}" && \
     find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" -type f -name 'hsqldb-*.jar' -delete && \
-    unzip "/src/artifacts/pentaho-server-ee-${PENTAHO_SERVER_EE}.zip" "pentaho-server/tomcat/lib/*.jar" -d "${PENTAHO_INSTALL}" && \
+    unzip "/s3/artifacts/pentaho-server-ee-${PENTAHO_SERVER_EE}.zip" "pentaho-server/tomcat/lib/*.jar" -d "${PENTAHO_INSTALL}" && \
     ( cd "${PENTAHO_INSTALL}/pentaho-server/tomcat/lib" && cp -vf "pentaho-tomcat-logs.jar" commons-logging-*.jar "${PENTAHO_TOMCAT}/lib" ) && \
     chmod -Rvc o-rwx "${PENTAHO_HOME}" "${PENTAHO_TOMCAT}" "${PENTAHO_PDI_HOME}" && \
     cp "${PENTAHO_SERVER}/pentaho-solutions/native-lib/linux/x86_64"/* "${PENTAHO_TOMCAT}/lib" && \
@@ -211,6 +214,7 @@ RUN --mount=type=cache,from=src,target=/src,id=artifacts,ro=true \
     export KETTLE_PLUGINS="${PENTAHO_SYSTEM}/kettle/plugins" && \
     export PDI_PLUGINS="${PENTAHO_PDI_HOME}/data-integration/plugins" && \
     for DIR in "${KETTLE_PLUGINS}" "${PDI_PLUGINS}" ; do \
+        [ -f "${CVE_FIX_FLAG}" ] && continue ; \
         rm -rvf \
             "${DIR}/azure-datalake2-vfs" \
             "${DIR}/azure-sqldb" \
@@ -257,7 +261,8 @@ COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" --chmod=0644 repository.spring.x
 COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" --chmod=0644 liquibase.properties "${LB_DIR}/"
 COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" "sql/${PENTAHO_VERSION}" "${LB_DIR}/pentaho/"
 
-RUN --mount=type=bind,source=CVE,target=/CVE apply-fixes /CVE
+RUN --mount=type=bind,target=/src \
+    [ -f "${CVE_FIX_FLAG}" ] || apply-fixes /src/CVE
 
 # This is for STIG compliance
 USER root
