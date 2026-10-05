@@ -11,7 +11,7 @@ render_temporary_sum()
 	local RC=0
 
 	local SUM=""
-	SUM="$(find "${DIR}" -type f | sort | xargs cat | sha256sum | awk '{ print $1 }')" || RC=${?}
+	SUM="$(find "${DIR}" -type f | sort | xargs -r cat | sha256sum | awk '{ print $1 }')" || RC=${?}
 	if [ ${RC} -ne 0 ] ; then
 		echo -n "Failed to compute the component checksum from [${DIR}] (rc=${RC}): ${SUM}"
 		return ${RC}
