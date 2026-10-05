@@ -147,7 +147,7 @@ COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" --chmod=0640 "server.xml" "loggi
 #
 ENV HOME="${PENTAHO_HOME}"
 
-ARG CVE_FIX_FLAG="/src/NO-CVE-FIXES
+ARG CVE_FIX_FLAG="/src/NO-CVE-FIXES"
 
 # Install Pentaho Server & Plugins
 RUN --mount=type=bind,target=/src,id=artifacts \
