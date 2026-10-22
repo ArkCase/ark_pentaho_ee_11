@@ -24,9 +24,8 @@
 #                   CRITICAL, HIGH, MED/MEDIUM, LOW, UNK/UNKNOWN, ALL.
 #   --ignore LIST   comma-separated severities to skip; applied after --levels, so
 #                   `--levels ALL --ignore LOW,UNK` means everything except those.
-#                   Decision is per family group: a lockstep member inherits the
-#                   highest severity found in its family, so a group is either
-#                   taken as a whole or skipped as a whole.
+#                   A family is filtered on its own severity (the highest among its
+#                   members), so it is taken as a whole or skipped as a whole.
 #   --snapshot DIR  resolve entry paths against an extracted tree instead of /. Only
 #                   for local verification: inside the image / is the only root that
 #                   exists, so a build run has no root to choose. The header prints
@@ -51,22 +50,29 @@
 #   --dry-run   print the plan only: no network, no writes
 #   --check     fetch + verify + osgi check, write nothing
 #
-# What it does:
-#   karaf lane  fetch target bundle, verify sha1, re-wrap with the vendor headers
+# What is applied: every entry under `families` is a family - members that move to
+# one target together; a standalone fix is a family of one. The family's `lane`
+# decides, and nothing else: auto applies every member, manual applies none.
+#   The whole file is validated before anything runs: a family set to auto that
+#   cannot work (karaf mechanism on a plain jar, jar swap of a fat jar, no target, a
+#   target that disagrees with its bundleReplacement URIs...) aborts the build.
+#
+# What each member `mechanism` does:
+#   karaf       fetch target bundle, verify sha1, re-wrap with the vendor headers
 #               when the upstream jar is not an OSGi bundle, place it in the karaf
 #               local Maven repo layout, drop the superseded jar, extend/add the
 #               <bundle> replacement in etc/org.apache.karaf.features.xml
-#   jar lane    fetch, verify sha1, replace the file in place, recreate the symlink
+#   jar         fetch, verify sha1, replace the file in place, recreate the symlink
 #   osgi check  every consumer Import-Package range is checked against the manifest
-#               as actually placed, over the FINAL tree (family lockstep is resolved
-#               before checking, so a group that moves together is not checked
-#               half-moved). Fails the build unless --no-osgi-fail is given.
-#   manual      printed as a pending-review list; a block runs only if it carries
-#               `accept: true`, which is how an accepted manual decision gets applied
+#               as actually placed, over the FINAL tree (every member of a family
+#               is placed before any consumer is checked, so a family is never
+#               checked half-moved). Fails the build unless --no-osgi-fail is given.
 #
-# No external Python packages: the YAML reader covers the subset this generator emits.
+# No external Python packages: the YAML reader covers the block-style subset the
+# generator writes, plus the usual hand edits (comments, quoting, flow lists).
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -77,15 +83,21 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 KARAF_SUB = 'app/pentaho/pentaho-server/pentaho-solutions/system/karaf'
+KARAF_REPO = '/system/karaf/system/'
 NS = 'http://karaf.apache.org/xmlns/features-processing/v1.0.0'
 MVN_CENTRAL_REPO = os.environ.get('MVN_CENTRAL_REPO', 'https://repo1.maven.org/maven2/')
-INSIDE_IMAGE = os.environ.get('INSIDE_IMAGE', 'n')
 
 SEV_RANK = {'CRITICAL': 5, 'HIGH': 4, 'MEDIUM': 3, 'LOW': 2, 'UNKNOWN': 1}
 SEV_ALIAS = {'CRIT': 'CRITICAL', 'CRITICAL': 'CRITICAL', 'HIGH': 'HIGH',
              'MED': 'MEDIUM', 'MEDIUM': 'MEDIUM', 'LOW': 'LOW',
              'UNK': 'UNKNOWN', 'UNKNOWN': 'UNKNOWN'}
 DEFAULT_LEVELS = 'HIGH,CRIT'
+SETTINGS_KEYS = ('levels', 'ignore', 'feature_processing', 'strict_sha1')
+TOP_KEYS = ('settings', 'header', 'families')
+
+
+def sev_name(s):
+    return SEV_ALIAS.get((s or '').strip().upper(), 'UNKNOWN')
 
 
 def sev_level_set(csv):
@@ -101,12 +113,6 @@ def sev_level_set(csv):
     return out
 
 
-def entry_severity(e):
-    """Group severity: the family's highest, which is how the group is decided."""
-    return e.get('family_severity') or e.get('severity') or 'UNKNOWN'
-
-
-def redf(s):  print(s, file=sys.stderr)
 def greenf(s): print(s)
 def warn(s):  print('WARN: %s' % s, file=sys.stderr)
 def note(s):  print('NOTE: %s' % s)
@@ -116,67 +122,136 @@ def fatal(s):
 
 
 # ---------------------------------------------------------------- YAML (subset)
-def yaml_parse(text):
-    """Reader for the patch-file subset: top-level keys (dict or list entries),
-    scalar or JSON-flow values. Enough for files written by generate-patch-lists,
-    and tolerant of hand edits (comments, unquoted flow lists)."""
-    data, section, entry = {}, None, None
-    for raw in text.splitlines():
-        if not raw.strip() or raw.lstrip().startswith('#'):
-            continue
-        if not raw.startswith(' '):
-            if raw.startswith('- '):           # block entry at column 0: belongs to the section
-                if data.get(section) is None:
-                    data[section] = []
-                entry = {}
-                data[section].append(entry)
-                k, v = raw[2:].split(':', 1)
-                entry[k.strip()] = value(v)
-                continue
-            key, rest = raw.split(':', 1)
-            section = key.strip()
-            data[section] = value(rest) if rest.strip() else None
-            entry = None
-            continue
-        s = raw.strip()
-        if data.get(section) is None:
-            data[section] = [] if s.startswith('- ') else {}
-        if isinstance(data[section], dict):
-            k, v = s.split(':', 1)
-            data[section][k.strip()] = value(v)
-            continue
-        if s.startswith('- '):
-            entry = {}
-            data[section].append(entry)
-            k, v = s[2:].split(':', 1)
-            entry[k.strip()] = value(v)
-        elif entry is not None:
-            k, v = s.split(':', 1)
-            entry[k.strip()] = value(v)
-    return data
+# Block mappings and sequences nested to any depth, plain / "double" / 'single'
+# quoted scalars, empty [] {}, flow lists, full-line and trailing comments. Plain
+# scalars are strings except true/false/null and whole integers, as in standard
+# YAML; plain decimals stay strings (an unquoted 1.10 is "1.10", not the float 1.1).
+# Anything else is rejected with its line number rather than guessed at.
+KEY_RE = re.compile(r'^([A-Za-z_][\w.\-]*)\s*:(?:\s+(.*))?$')
 
 
-def value(v):
-    v = v.strip()
-    if v.startswith(('[', '{')):
+def strip_comment(line):
+    q, i = None, 0
+    while i < len(line):
+        ch = line[i]
+        if q == '"' and ch == '\\':
+            i += 2
+            continue
+        if q == "'" and ch == "'" and line[i + 1:i + 2] == "'":
+            i += 2
+            continue
+        if q:
+            if ch == q:
+                q = None
+        elif ch in '"\'' and (i == 0 or line[i - 1] in ' -:[{,'):
+            q = ch
+        elif ch == '#' and (i == 0 or line[i - 1] in ' \t'):
+            return line[:i].rstrip()
+        i += 1
+    return line.rstrip()
+
+
+def yaml_parse(text, name):
+    lines = []
+    for n, raw in enumerate(text.splitlines(), 1):
+        lead = raw[:len(raw) - len(raw.lstrip())]
+        if '\t' in lead:
+            fatal('%s line %d: tab in indentation' % (name, n))
+        s = strip_comment(raw)
+        if not s.strip() or s.strip() in ('---', '...'):
+            continue
+        lines.append([len(s) - len(s.lstrip(' ')), s.strip(), n])
+    if not lines:
+        return {}
+    ctx = {'name': name}
+    val, i = _block(lines, 0, lines[0][0], ctx)
+    if i < len(lines):
+        fatal('%s line %d: unexpected indentation' % (name, lines[i][2]))
+    if not isinstance(val, dict):
+        fatal('%s: the top level must be a mapping' % name)
+    return val
+
+
+def _is_item(s):
+    return s == '-' or s.startswith('- ')
+
+
+def _block(lines, i, ind, ctx):
+    return (_seq if _is_item(lines[i][1]) else _map)(lines, i, ind, ctx)
+
+
+def _map(lines, i, ind, ctx):
+    out = {}
+    while i < len(lines) and lines[i][0] == ind and not _is_item(lines[i][1]):
+        m = KEY_RE.match(lines[i][1])
+        n = lines[i][2]
+        if not m:
+            fatal('%s line %d: expected "key: value", got %r' % (ctx['name'], n, lines[i][1]))
+        key, rest = m.group(1), (m.group(2) or '').strip()
+        if key in out:
+            fatal('%s line %d: duplicate key %r' % (ctx['name'], n, key))
+        i += 1
+        if rest:
+            out[key] = _value(rest, n, ctx)
+        elif i < len(lines) and (lines[i][0] > ind or (lines[i][0] == ind and _is_item(lines[i][1]))):
+            out[key], i = _block(lines, i, lines[i][0], ctx)   # a sequence may sit at the key's indent
+        else:
+            out[key] = None
+    return out, i
+
+
+def _seq(lines, i, ind, ctx):
+    out = []
+    while i < len(lines) and lines[i][0] == ind and _is_item(lines[i][1]):
+        s, n = lines[i][1], lines[i][2]
+        content = s[1:].lstrip()
+        if not content:
+            i += 1
+            if i < len(lines) and lines[i][0] > ind:
+                v, i = _block(lines, i, lines[i][0], ctx)
+            else:
+                v = None
+            out.append(v)
+        elif KEY_RE.match(content):
+            # "- key: value" opens a mapping whose keys line up with "key"
+            lines[i] = [ind + len(s) - len(content), content, n]
+            v, i = _map(lines, i, lines[i][0], ctx)
+            out.append(v)
+        else:
+            out.append(_value(content, n, ctx))
+            i += 1
+    return out, i
+
+
+def _value(v, n, ctx):
+    if v == '[]':
+        return []
+    if v == '{}':
+        return {}
+    if v[0] in '[{':
         try:
             return json.loads(v)
-        except Exception:
-            inner = v[1:-1].strip()          # hand-typed flow list: [a, b] unquoted
-            return [] if not inner else [x.strip().strip('"\'') for x in inner.split(',')]
-    return scalar(v)
-
-
-def scalar(v):
-    if not isinstance(v, str):
-        return v
-    v = v.strip()
-    if v in ('true', 'false'):
-        return v == 'true'
-    if v == 'null':
+        except ValueError:
+            if v[0] == '[' and v.endswith(']'):          # hand-typed flow list: [a, b]
+                return [_value(x.strip(), n, ctx) for x in v[1:-1].split(',') if x.strip()]
+            fatal('%s line %d: cannot read %s (quote it if it is a string)' % (ctx['name'], n, v))
+    if v[0] == '"':
+        try:
+            return json.loads(v)
+        except ValueError:
+            fatal('%s line %d: bad double-quoted string %s' % (ctx['name'], n, v))
+    if v[0] == "'":
+        if len(v) < 2 or not v.endswith("'"):
+            fatal('%s line %d: bad single-quoted string %s' % (ctx['name'], n, v))
+        return v[1:-1].replace("''", "'")
+    if v in ('true', 'True', 'TRUE'):
+        return True
+    if v in ('false', 'False', 'FALSE'):
+        return False
+    if v in ('null', 'Null', 'NULL', '~'):
         return None
-    if len(v) >= 2 and v.startswith('"') and v.endswith('"'):
-        return json.loads(v)
+    if re.match(r'^[-+]?[0-9]+$', v):
+        return int(v)
     return v
 
 
@@ -276,7 +351,6 @@ def verify_sha1(spec, path, strict):
             return True
         return False
     expected = open(tmp).read().split()[0]
-    import hashlib
     actual = hashlib.sha1(open(path, 'rb').read()).hexdigest()
     if expected == actual:
         return True
@@ -350,7 +424,11 @@ def ensure_feature_processing(cfg_path):
     print('enabled featureProcessing in %s' % os.path.basename(cfg_path))
 
 
-def osgi_check(jar, karaf_system, pre_ver):
+def osgi_check(jar, karaf_system, pre_ver, overlay=None):
+    """Check every consumer under karaf_system against jar's exports. overlay maps a
+    jar in the tree to the fetched jar that replaces it, so --check (which writes
+    nothing) still judges the final tree, with every family member moved."""
+    overlay = overlay or {}
     man = manifest(jar)
     if not man:
         print('  osgi check: no manifest on %s (plain jar) - nothing to check' % os.path.basename(jar))
@@ -361,8 +439,8 @@ def osgi_check(jar, karaf_system, pre_ver):
         for f in fs:
             if not f.endswith('.jar'):
                 continue
-            p = os.path.join(dp, f)
-            if p == jar:
+            p = overlay.get(os.path.normpath(os.path.join(dp, f)), os.path.join(dp, f))
+            if os.path.normpath(p) == os.path.normpath(jar):
                 continue
             m = manifest(p)
             if not m:
@@ -401,6 +479,75 @@ def place(src, dst, mode):
     os.chmod(dst, mode)
 
 
+# ---------------------------------------------------------------- validation
+def member_problems(e, label):
+    """Why a member of a family switched to auto cannot be applied. Every switched-on
+    family is checked before anything is fetched or written."""
+    mech, out = e.get('mechanism'), []
+    name = '%s: %s/%s' % (label, e.get('group'), e.get('artifact'))
+    target, current, paths = e.get('target'), e.get('current'), e.get('paths') or []
+    if mech not in ('karaf', 'jar'):
+        return ['%s: mechanism must be karaf or jar, not %r (to leave it out, set the family lane to manual)'
+                % (name, mech)]
+    if not e.get('group') or not e.get('artifact') or not current:
+        out.append('%s: group, artifact and current are required' % name)
+    if not target:
+        out.append('%s: no target version - there is nothing to apply' % name)
+    if not paths:
+        out.append('%s: no paths' % name)
+    in_repo = [p for p in paths if KARAF_REPO in '/' + p]
+    if mech == 'karaf':
+        if len(in_repo) != len(paths):
+            out.append('%s: mechanism karaf, but not every path is in the karaf system repo' % name)
+        pr = e.get('processing') or {}
+        repl, orig = pr.get('replacement') or '', pr.get('originalUri') or ''
+        if not repl or not orig:
+            out.append('%s: mechanism karaf needs processing.originalUri and processing.replacement' % name)
+        elif target and not (re.search(r'/%s(/|$)' % re.escape(target), repl)
+                             and (',%s)' % target) in orig):
+            out.append('%s: processing URIs (%s -> %s) do not move to target %s; fix them or the target'
+                       % (name, orig, repl, target))
+    else:
+        if in_repo:
+            out.append('%s: mechanism jar, but paths are in the karaf system repo' % name)
+        expect = '%s-%s.jar' % (e.get('artifact'), current)
+        odd = [p for p in paths if os.path.basename(p) != expect]
+        if odd:
+            out.append('%s: a jar swap replaces files named %s, but %s is not one (a fat or renamed jar '
+                       'would lose everything else in it)' % (name, expect, ', '.join(odd)))
+    return out
+
+
+def versions_as_text(e):
+    """A hand-typed unquoted version (target: 5) reads as a number; versions are text."""
+    for k in ('current', 'target'):
+        if e.get(k) is not None and not isinstance(e[k], str):
+            e[k] = str(e[k])
+    return e
+
+
+def load_families(data, problems):
+    """Every entry is a family: members that move to one target together, switched
+    by the family's lane. A standalone fix is a family of one."""
+    families = []
+    for i, f in enumerate(data.get('families') or [], 1):
+        versions_as_text(f)
+        label = f.get('name') or 'family #%d' % i
+        lane = f.get('lane')
+        members = [versions_as_text(dict(m, target=f.get('target'))) for m in (f.get('patches') or [])]
+        if lane not in ('auto', 'manual'):
+            problems.append('%s: lane must be auto or manual, not %r' % (label, lane))
+        elif lane == 'auto':
+            if not members:
+                problems.append('%s: lane auto, but it has no patches' % label)
+            for m in members:
+                problems.extend(member_problems(m, label))
+        families.append({'label': label, 'apply': lane == 'auto', 'severity': sev_name(f.get('severity')),
+                         'target': f.get('target'), 'reason': f.get('reason'),
+                         'osgi_check': f.get('osgi_check'), 'members': members})
+    return families
+
+
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description='Apply a committed YAML patch list during the container build.')
@@ -426,14 +573,23 @@ def main():
 
     if not os.path.exists(args.patches):
         fatal('patch file not found: %s' % args.patches)
-    data = yaml_parse(open(args.patches).read())
-    for k, v in data.items():
-        if v is None:
-            data[k] = []            # a section with no entries
+    data = yaml_parse(open(args.patches).read(), args.patches)
+    old = [k for k in ('karaf', 'jars', 'manual', 'patches') if k in data]
+    if old:
+        fatal('%s uses the old sectioned layout (%s); regenerate it with generate-patch-lists'
+              % (args.patches, ', '.join(old)))
+    for k in data:
+        if k not in TOP_KEYS:
+            warn('top-level key %r is not read by this script - ignored' % k)
     settings = data.get('settings') or {}
     for k in sorted(settings):
-        if k not in ('levels', 'ignore', 'feature_processing', 'strict_sha1'):
+        if k not in SETTINGS_KEYS:
             warn('settings key %r is not read by this script - ignored' % k)
+
+    problems = []
+    units = load_families(data, problems)
+    if problems:
+        fatal('%s cannot be applied as written:\n  %s' % (args.patches, '\n  '.join(problems)))
 
     # Entry paths are relative to the filesystem root, exactly as Trivy reports them.
     # The root is not recorded in the patch file: inside the image / is the only root
@@ -457,100 +613,90 @@ def main():
     levels = sev_level_set(args.levels or settings.get('levels') or DEFAULT_LEVELS)
     ignore = sev_level_set(args.ignore if args.ignore is not None else settings.get('ignore'))
 
-    if settings.get('feature_processing'):
+    def selected(u):
+        if u['severity'] in ignore:
+            return False
+        return 'ALL' in levels or u['severity'] in levels
+
+    to_apply = [u for u in units if u['apply'] and selected(u)]
+    out_of_scope = [u for u in units if u['apply'] and not selected(u)]
+    pending = [u for u in units if not u['apply']]
+    work = [dict(m, sev=u['severity'], unit=u['label']) for u in to_apply for m in u['members']]
+
+    print('patch file  : %s' % args.patches)
+    print('root        : %s%s' % (root, ' (--snapshot, local run only)' if args.snapshot else ''))
+    print('levels      : %s' % (','.join(sorted(levels)) if levels else '(none)'))
+    print('ignore      : %s' % (','.join(sorted(ignore)) if ignore else '(none)'))
+    print('osgi check  : %s' % ('on, fails the build' if fail_on_check
+                                 else 'on, warnings only (--no-osgi-fail)'
+                                 if run_check else 'off (--no-osgi-check)'))
+    print('sha1        : %s' % ('strict' if strict else 'lenient (warns, continues)'))
+    print('families    : %d (%d set to auto, %d manual)'
+          % (len(units), sum(u['apply'] for u in units), len(pending)))
+    print('applying    : %d families, %d bundles/jars (%d karaf, %d jar)'
+          % (len(to_apply), len(work), sum(e['mechanism'] == 'karaf' for e in work),
+             sum(e['mechanism'] == 'jar' for e in work)))
+    if out_of_scope:
+        print('out of severity scope (%d, not applied):' % len(out_of_scope))
+        for u in out_of_scope:
+            print('  %s %s -> %s' % (u['severity'], u['label'], u['target']))
+    if pending:
+        print('manual (%d, not applied):' % len(pending))
+        for u in pending:
+            print('  %s %s -> %s%s' % (u['severity'], u['label'], u['target'] or '-',
+                                       (' - ' + u['reason']) if u['reason'] else ''))
+
+    if settings.get('feature_processing') and any(e['mechanism'] == 'karaf' for e in work):
         cfg = os.path.join(karaf_home, 'etc/org.apache.karaf.features.cfg')
         if write:
             ensure_feature_processing(cfg)
         else:
             print('plan: ensure featureProcessing=org.apache.karaf.features.xml in %s' % os.path.basename(cfg))
 
-    work = list(data.get('karaf', [])) + list(data.get('jars', []))
-    accepted = [e for e in data.get('manual', []) if e.get('accept')]
-    work += accepted
-    pending = [e for e in data.get('manual', []) if not e.get('accept')]
-
-    def selected(e):
-        sev = entry_severity(e)
-        if sev in ignore:
-            return False
-        return 'ALL' in levels or sev in levels
-
-    out_of_scope = [e for e in work if not selected(e)]
-    work = [e for e in work if selected(e)]
-
-    print('patch file : %s' % args.patches)
-    print('root        : %s%s' % (root, ' (--snapshot, local run only)' if args.snapshot else ''))
-    print('levels      : %s' % (','.join(sorted(levels)) if levels else '(none)'))
-    print('ignore      : %s' % (','.join(sorted(ignore)) if ignore else '(none)'))
-    print('osgi check  : %s' % ('on, fails the build' if fail_on_check
-                                 else 'on, warnings only (--no-osgi-fail)'
-                                if run_check else 'off (--no-osgi-check)'))
-    print('sha1        : %s' % ('strict' if strict else 'lenient (warns, continues)'))
-    print('entries     : %d (%d karaf, %d jars, %d accepted from manual)'
-          % (len(work), len(data.get('karaf', [])), len(data.get('jars', [])), len(accepted)))
-    if out_of_scope:
-        print('out of severity scope (%d, not applied):' % len(out_of_scope))
-        for e in out_of_scope:
-            print('  %s %s/%s %s -> %s %s' % (entry_severity(e), e['group'], e['artifact'],
-                                              e.get('current'), e.get('target'), e.get('reason', '')))
-    if pending:
-        print('pending manual review (%d, not applied):' % len(pending))
-        for e in pending:
-            print('  %s %s/%s %s -> %s [%s] %s' % (entry_severity(e), e['group'], e['artifact'],
-                                                    e.get('current'), e.get('target'),
-                                                    e.get('jump', '-'), e.get('reason', '')))
-
-    # ---- pass 1: place everything (so the osgi check sees the final tree) ----
+    # ---- pass 1: fetch and verify everything (so the osgi check sees the final tree) ----
     staged = []
+    shown = set()
     for e in work:
-        group, artifact, target, cur = e['group'], e['artifact'], e['target'], e['current']
-        # an accepted manual entry carries the lane it would be applied on; a
-        # processing block means the Karaf lane, otherwise it is a file swap
-        lane = e['lane'] if e['lane'] in ('karaf', 'jar') else \
-               ('karaf' if (e.get('processing') or {}).get('originalUri') else 'jar')
+        if e['unit'] not in shown:
+            shown.add(e['unit'])
+            u = next(x for x in to_apply if x['label'] == e['unit'])
+            print('%s -> %s (%s, %d member%s)' % (u['label'], u['target'], u['severity'], len(u['members']),
+                                                's' if len(u['members']) > 1 else ''))
+            if not fetch_it and u.get('osgi_check'):
+                print('  osgi check (recorded at generation time): %s' % u['osgi_check'].get('status'))
+        group, artifact, target, cur, mech = e['group'], e['artifact'], e['target'], e['current'], e['mechanism']
         spec = '%s:%s:%s:jar' % (group, artifact, target)
         classifier = (e.get('processing') or {}).get('classifier') or e.get('classifier')
         if classifier:
             spec += ':%s' % classifier
-        print('%s %s %s/%s %s -> %s' % (lane, entry_severity(e), group, artifact, cur, target))
-        if not e.get('fetchable', True):
-            warn('  skipped: vendor artifact, nothing to fetch from Maven Central (needs the vendor release)')
-            continue
+        print('  %s %s/%s %s -> %s' % (mech, group, artifact, cur, target))
         gpath = group.replace('.', '/')
         arch = os.path.join(karaf_system, gpath, artifact)
         arch_cur = os.path.join(arch, cur, '%s-%s.jar' % (artifact, cur))
         arch_tgt = os.path.join(arch, target, '%s-%s.jar' % (artifact, target))
 
-        if lane == 'karaf' and os.path.exists(arch_tgt):
+        if mech == 'karaf' and os.path.exists(arch_tgt):
             note('  already seeded, skipped')
-            staged.append((e, arch_tgt, lane))
+            staged.append((e, arch_tgt))
             continue
 
         if not fetch_it:
             print('  plan: fetch %s%s' % (artifact_url(spec), ' (wrap if the upstream jar is not an OSGi bundle)'
-                                          if lane == 'karaf' else ''))
-            if lane == 'karaf':
+                                          if mech == 'karaf' else ''))
+            if mech == 'karaf':
                 pr = e.get('processing') or {}
-                print('  plan: %s bundleReplacement %s' % (pr.get('action') or 'add',
-                      pr.get('originalUri') or 'mvn:%s/%s/[%s,%s)' % (group, artifact, cur, target)))
-                if e.get('family_lockstep'):
-                    print('  plan: family lockstep members move with it (%d)' % len(e['family_lockstep']))
+                print('  plan: %s bundleReplacement %s' % (pr.get('action') or 'add', pr.get('originalUri')))
             else:
                 for p in e.get('paths', []):
                     print('  plan: replace %s' % p)
-            g = (e.get('osgi_check') or {})
-            if g:
-                print('  osgi check: %s%s' % (g.get('status'),
-                      ' (recorded at generation time; re-checked against the fetched manifest in --check)'
-                      if g.get('status') != 'skipped' else ''))
             continue
 
         out = os.path.join(os.environ.get('TMPDIR') or '/tmp', '%s-%s.jar' % (artifact, target))
         fetch(spec, out)
         if not verify_sha1(spec, out, strict):
             fatal('sha1 verification failed for %s (strict)' % spec)
-        if lane != 'karaf':
-            staged.append((e, out, lane))
+        if mech != 'karaf':
+            staged.append((e, out))
             continue
 
         if not manifest(out):
@@ -563,18 +709,17 @@ def main():
                   % (e.get('symbolic_name') or manifest(arch_cur).get('Bundle-SymbolicName', '?')))
         else:
             print('  native OSGi bundle, manifest as shipped')
-        staged.append((e, out, lane))
+        staged.append((e, out))
 
-    # ---- pass 2: write + gate against the final tree ----
-    for e, placed, lane in staged:
-        group, artifact, target, cur = e['group'], e['artifact'], e['target'], e['current']
-        if lane != 'karaf':
+    # ---- pass 2: write ----
+    for e, placed in staged:
+        group, artifact, target, cur, mech = e['group'], e['artifact'], e['target'], e['current'], e['mechanism']
+        if mech != 'karaf':
             for p in e.get('paths', []):
                 full = os.path.join(root, p)
                 if not (os.path.exists(full) or os.path.islink(full)):
                     warn('  path not present, skipped: %s' % p)
                     continue
-                mode = oct(os.stat(full).st_mode & 0o777)
                 new = os.path.join(os.path.dirname(full), '%s-%s.jar' % (artifact, target))
                 if not write:
                     print('  plan: replace %s' % p)
@@ -586,6 +731,7 @@ def main():
                         place(placed, dst, os.stat(real).st_mode & 0o777)
                         os.remove(real)
                         print('  replaced %s' % os.path.basename(real))
+                    os.remove(full)
                     os.symlink('%s-%s.jar' % (artifact, target), full)
                     print('  re-pointed symlink %s' % os.path.basename(full))
                 else:
@@ -602,17 +748,12 @@ def main():
         arch_cur = os.path.join(arch, cur, '%s-%s.jar' % (artifact, cur))
         arch_tgt = os.path.join(arch, target, '%s-%s.jar' % (artifact, target))
         pr = e.get('processing') or {}
-        uri = pr.get('originalUri') or 'mvn:%s/%s/[%s,%s)' % (group, artifact, cur, target)
-        repl = pr.get('replacement') or 'mvn:%s/%s/%s' % (group, artifact, target)
+        uri, repl = pr['originalUri'], pr['replacement']
         mode = pr.get('mode') or 'maven'
         bsn = pr.get('symbolicName') or e.get('symbolic_name') or ''
         if not write:
             print('  plan: place %s, remove %s' % (arch_tgt, arch_cur))
             print('  plan: %s bundleReplacement %s' % (pr.get('action') or 'add', uri))
-            if run_check:
-                osgi_check(placed, karaf_system, cur)
-            else:
-                print('  osgi check skipped (--no-osgi-check): unproven')
             continue
         os.makedirs(os.path.join(arch, target), exist_ok=True)
         place(placed, arch_tgt, 0o640)
@@ -622,25 +763,32 @@ def main():
             print('  removed superseded %s' % os.path.dirname(arch_cur))
         features_xml(os.path.join(karaf_home, 'etc/org.apache.karaf.features.xml'), uri, repl, mode, bsn)
 
-    # ---- pass 3: osgi check over the final tree (every member of a group is
-    # placed before any consumer is re-checked, so a family cannot be gated half-moved) ----
+    # ---- pass 3: osgi check over the final tree. Every member of every family is in
+    # place (or, in --check, staged) before any consumer is checked, so a family is
+    # never judged half-moved ----
     failures = []
-    if run_check:
-        for e in work:
-            lane = e['lane'] if e['lane'] in ('karaf', 'jar') else \
-                   ('karaf' if (e.get('processing') or {}).get('originalUri') else 'jar')
-            if lane != 'karaf' or not fetch_it:
-                continue
-            placed = os.path.join(karaf_system, e['group'].replace('.', '/'), e['artifact'],
-                                  e['target'], '%s-%s.jar' % (e['artifact'], e['target']))
+    if run_check and fetch_it:
+        karaf_staged = [(e, p) for e, p in staged if e['mechanism'] == 'karaf']
+        overlay = {}
+        if not write:
+            for e, placed in karaf_staged:
+                cur = os.path.join(karaf_system, e['group'].replace('.', '/'), e['artifact'],
+                                   e['current'], '%s-%s.jar' % (e['artifact'], e['current']))
+                overlay[os.path.normpath(cur)] = placed
+        for e, placed in karaf_staged:
+            if write:
+                placed = os.path.join(karaf_system, e['group'].replace('.', '/'), e['artifact'],
+                                      e['target'], '%s-%s.jar' % (e['artifact'], e['target']))
             if not os.path.exists(placed):
                 continue
-            if not osgi_check(placed, karaf_system, e['current']):
+            if not osgi_check(placed, karaf_system, e['current'], overlay):
                 failures.append('%s/%s' % (e['group'], e['artifact']))
         if failures:
             if fail_on_check:
                 fatal('osgi check failed for: %s' % ', '.join(failures))
             warn('osgi check failed for: %s (report only)' % ', '.join(failures))
+    elif not run_check:
+        print('osgi check skipped (--no-osgi-check): karaf moves are unproven')
 
     if write:
         greenf('patch list applied')
