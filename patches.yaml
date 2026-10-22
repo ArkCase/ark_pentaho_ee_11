@@ -1,0 +1,611 @@
+settings:
+  levels: HIGH,CRIT
+  feature_processing: true
+  strict_sha1: false
+header:
+  generator: generate-patch-lists
+  source: vulnerabilities/vulnerabilities.json
+  source_sha256: 33e7b855b5ffb861d9f267d00998e38a3618169c83b5f7adbf60bd03ff1aa2fe
+  scan_artifact: "207428623785.dkr.ecr.us-east-1.amazonaws.com/arkcase/pentaho-ee-11:11.0.0.3_b80"
+  target_rule: smallest fixed candidate on the same major line; patch-level jumps only
+  families: ["bouncycastle", "jackson", "jetty", "log4j2", "netty", "poi", "spring"]
+  family_severity: {"bouncycastle": "CRITICAL", "jackson": "HIGH", "jetty": null, "log4j2": null, "netty": null, "poi": "MEDIUM", "spring": "HIGH"}
+karaf:
+jars:
+  - lane: jar
+    group: com.nimbusds
+    artifact: nimbus-jose-jwt
+    current: 9.37.2
+    target: 9.37.4
+    jump: patch
+    severity: MEDIUM
+    cves: ["CVE-2025-53864"]
+    paths: ["app/tomcat/webapps/pentaho/WEB-INF/lib/nimbus-jose-jwt-9.37.2.jar"]
+    fetchable: true
+    accept_into: jar
+manual:
+  - lane: manual
+    group: com.fasterxml.jackson.core
+    artifact: jackson-core
+    current: 2.18.8
+    target: 2.18.11
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    cves: ["CVE-2026-89407", "CVE-2026-89425"]
+    paths: ["app/pentaho-pdi/data-integration/lib/jackson-core-2.18.8.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/core/jackson-core/2.18.8/jackson-core-2.18.8.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/jackson-core-2.18.8.jar"]
+    symbolic_name: com.fasterxml.jackson.core.jackson-core
+    wrapped: false
+    osgi_source: true
+    candidates: ["2.18.11", "2.21.7", "2.22.3"]
+    processing: {"action": "extend", "existing_originalUri": "mvn:com.fasterxml.jackson.core/jackson-core/[2.9.0,2.18.8)", "originalUri": "mvn:com.fasterxml.jackson.core/jackson-core/[2.9.0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson.core/jackson-core/2.18.11", "mode": "maven", "symbolicName": "com.fasterxml.jackson.core.jackson-core", "classifier": null, "feature_pins": ["2.12.3", "2.13.2", "2.14.3", "2.18.8", "2.19.2", "2.7.0"]}
+    osgi_check: {"status": "pass", "violations": [], "pre_existing_violations": [], "evaluated_against": "2.18.11", "lockstep_members": 15}
+    family_lockstep: [{"group": "com.fasterxml.jackson.core", "artifact": "jackson-databind", "current": "2.18.8", "must_move_to": "2.18.11", "path": "app/pentaho-pdi/data-integration/lib/jackson-databind-2.18.8.jar", "osgi_source": false, "in_scan": true}, {"group": "com.fasterxml.jackson", "artifact": "jackson-annotations", "current": "2.18.8", "must_move_to": "2.18.11", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/core/jackson-annotations/2.18.8/jackson-annotations-2.18.8.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-core", "current": "2.18.8", "must_move_to": "2.18.11", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/core/jackson-core/2.18.8/jackson-core-2.18.8.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-databind", "current": "2.18.8", "must_move_to": "2.18.11", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/core/jackson-databind/2.18.8/jackson-databind-2.18.8.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-jaxrs-base", "current": "2.18.8", "must_move_to": "2.18.11", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/jaxrs/jackson-jaxrs-base/2.18.8/jackson-jaxrs-base-2.18.8.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-jaxrs-json-provider", "current": "2.18.8", "must_move_to": "2.18.11", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/jaxrs/jackson-jaxrs-json-provider/2.18.8/jackson-jaxrs-json-provider-2.18.8.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-module-jaxb-annotations", "current": "2.18.8", "must_move_to": "2.18.11", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/module/jackson-module-jaxb-annotations/2.18.8/jackson-module-jaxb-annotations-2.18.8.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-dataformat-yaml", "current": "2.14.1", "must_move_to": "2.18.11", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/hitachivantara/jackson-dataformat-yaml/2.14.1/jackson-dataformat-yaml-2.14.1.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-dataformat-cbor", "current": "2.18.8", "must_move_to": "2.18.11", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/amazon-redshift/lib/jackson-dataformat-cbor-2.18.8.jar", "osgi_source": false, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-dataformat-xml", "current": "2.10.1", "must_move_to": "2.18.11", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/azure-datalake1-vfs/lib/jackson-dataformat-xml-2.10.1.jar", "osgi_source": false, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-datatype-jsr310", "current": "2.18.8", "must_move_to": "2.18.11", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/azure-datalake1-vfs/lib/jackson-datatype-jsr310-2.18.8.jar", "osgi_source": false, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-module-jaxb-annotations", "current": "2.10.1", "must_move_to": "2.18.11", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/azure-datalake1-vfs/lib/jackson-module-jaxb-annotations-2.10.1.jar", "osgi_source": false, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-jakarta-rs-base", "current": "2.18.8", "must_move_to": "2.18.11", "path": "app/pentaho-pdi/data-integration/lib/jackson-jakarta-rs-base-2.18.8.jar", "osgi_source": false, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-jakarta-rs-json-provider", "current": "2.18.8", "must_move_to": "2.18.11", "path": "app/pentaho-pdi/data-integration/lib/jackson-jakarta-rs-json-provider-2.18.8.jar", "osgi_source": false, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-module-jakarta-xmlbind-annotations", "current": "2.18.8", "must_move_to": "2.18.11", "path": "app/pentaho-pdi/data-integration/lib/jackson-module-jakarta-xmlbind-annotations-2.18.8.jar", "osgi_source": false, "in_scan": false}]
+    family_other_majors: ["jackson-core-asl 1.9.13", "jackson-jaxrs 1.9.13", "jackson-xc 1.9.13"]
+    accept_into: karaf
+    reason: "family lockstep: 15 jackson member(s) on line main must move to 2.18.11 with it"
+  - lane: manual
+    group: com.fasterxml.jackson.core
+    artifact: jackson-databind
+    current: 2.18.8
+    target: 2.18.10
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    cves: ["CVE-2026-19032", "CVE-2026-54515", "CVE-2026-59889", "CVE-2026-68497", "CVE-2026-77310", "CVE-2026-83557", "CVE-2026-91776", "CVE-2026-91777", "GHSA-mhm7-754m-9p8w"]
+    paths: ["app/pentaho-pdi/data-integration/lib/jackson-databind-2.18.8.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/core/jackson-databind/2.18.8/jackson-databind-2.18.8.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/jackson-databind-2.18.8.jar"]
+    symbolic_name: com.fasterxml.jackson.core.jackson-databind
+    wrapped: false
+    osgi_source: true
+    candidates: ["2.18.10", "2.21.6", "2.22.2"]
+    processing: {"action": "extend", "existing_originalUri": "mvn:com.fasterxml.jackson.core/jackson-databind/[2.9.0,2.18.8)", "originalUri": "mvn:com.fasterxml.jackson.core/jackson-databind/[2.9.0,2.18.10)", "replacement": "mvn:com.fasterxml.jackson.core/jackson-databind/2.18.10", "mode": "maven", "symbolicName": "com.fasterxml.jackson.core.jackson-databind", "classifier": null, "feature_pins": ["2.12.3", "2.13.2", "2.14.3", "2.18.8", "2.19.2", "2.7.0"]}
+    osgi_check: {"status": "pass", "violations": [], "pre_existing_violations": [], "evaluated_against": "2.18.10", "lockstep_members": 15}
+    family_lockstep: [{"group": "com.fasterxml.jackson.core", "artifact": "jackson-core", "current": "2.18.8", "must_move_to": "2.18.10", "path": "app/pentaho-pdi/data-integration/lib/jackson-core-2.18.8.jar", "osgi_source": false, "in_scan": true}, {"group": "com.fasterxml.jackson", "artifact": "jackson-annotations", "current": "2.18.8", "must_move_to": "2.18.10", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/core/jackson-annotations/2.18.8/jackson-annotations-2.18.8.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-core", "current": "2.18.8", "must_move_to": "2.18.10", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/core/jackson-core/2.18.8/jackson-core-2.18.8.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-databind", "current": "2.18.8", "must_move_to": "2.18.10", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/core/jackson-databind/2.18.8/jackson-databind-2.18.8.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-jaxrs-base", "current": "2.18.8", "must_move_to": "2.18.10", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/jaxrs/jackson-jaxrs-base/2.18.8/jackson-jaxrs-base-2.18.8.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-jaxrs-json-provider", "current": "2.18.8", "must_move_to": "2.18.10", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/jaxrs/jackson-jaxrs-json-provider/2.18.8/jackson-jaxrs-json-provider-2.18.8.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-module-jaxb-annotations", "current": "2.18.8", "must_move_to": "2.18.10", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/module/jackson-module-jaxb-annotations/2.18.8/jackson-module-jaxb-annotations-2.18.8.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-dataformat-yaml", "current": "2.14.1", "must_move_to": "2.18.10", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/hitachivantara/jackson-dataformat-yaml/2.14.1/jackson-dataformat-yaml-2.14.1.jar", "osgi_source": true, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-dataformat-cbor", "current": "2.18.8", "must_move_to": "2.18.10", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/amazon-redshift/lib/jackson-dataformat-cbor-2.18.8.jar", "osgi_source": false, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-dataformat-xml", "current": "2.10.1", "must_move_to": "2.18.10", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/azure-datalake1-vfs/lib/jackson-dataformat-xml-2.10.1.jar", "osgi_source": false, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-datatype-jsr310", "current": "2.18.8", "must_move_to": "2.18.10", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/azure-datalake1-vfs/lib/jackson-datatype-jsr310-2.18.8.jar", "osgi_source": false, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-module-jaxb-annotations", "current": "2.10.1", "must_move_to": "2.18.10", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/azure-datalake1-vfs/lib/jackson-module-jaxb-annotations-2.10.1.jar", "osgi_source": false, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-jakarta-rs-base", "current": "2.18.8", "must_move_to": "2.18.10", "path": "app/pentaho-pdi/data-integration/lib/jackson-jakarta-rs-base-2.18.8.jar", "osgi_source": false, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-jakarta-rs-json-provider", "current": "2.18.8", "must_move_to": "2.18.10", "path": "app/pentaho-pdi/data-integration/lib/jackson-jakarta-rs-json-provider-2.18.8.jar", "osgi_source": false, "in_scan": false}, {"group": "com.fasterxml.jackson", "artifact": "jackson-module-jakarta-xmlbind-annotations", "current": "2.18.8", "must_move_to": "2.18.10", "path": "app/pentaho-pdi/data-integration/lib/jackson-module-jakarta-xmlbind-annotations-2.18.8.jar", "osgi_source": false, "in_scan": false}]
+    family_other_majors: ["jackson-core-asl 1.9.13", "jackson-jaxrs 1.9.13", "jackson-xc 1.9.13"]
+    accept_into: karaf
+    reason: "family lockstep: 15 jackson member(s) on line main must move to 2.18.10 with it"
+  - lane: manual
+    group: com.mchange
+    artifact: c3p0
+    current: 0.12.0
+    target: 0.14.0
+    jump: minor
+    severity: MEDIUM
+    cves: ["CVE-2026-55223"]
+    paths: ["app/pentaho-pdi/data-integration/plugins/scheduler-plugin/lib/c3p0-0.12.0.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (0.12.0 -> 0.14.0) - flagged for manual review
+  - lane: manual
+    group: commons-configuration
+    artifact: commons-configuration
+    current: 1.10
+    severity: LOW
+    cves: ["CVE-2025-46392"]
+    paths: ["app/pentaho-pdi/data-integration/plugins/pdi-projects-plugin/lib/commons-configuration-1.10.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/pdi-projects-plugin/lib/commons-configuration-1.10.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/pdi-projects-server-plugin/lib/commons-configuration-1.10.jar"]
+    reason: no fixed version reported (unfixable)
+  - lane: manual
+    group: commons-configuration
+    artifact: commons-configuration
+    current: 1.6
+    severity: LOW
+    cves: ["CVE-2025-46392"]
+    paths: ["app/pentaho-pdi/data-integration/plugins/metaverse-plugin/lib/commons-configuration-1.6.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/metaverse-plugin/lib/commons-configuration-1.6.jar"]
+    reason: no fixed version reported (unfixable)
+  - lane: manual
+    group: commons-configuration
+    artifact: commons-configuration
+    current: 1.9
+    severity: LOW
+    cves: ["CVE-2025-46392"]
+    paths: ["app/pentaho-pdi/data-integration/lib/commons-configuration-1.9.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/commons-configuration-1.9.jar"]
+    reason: no fixed version reported (unfixable)
+  - lane: manual
+    group: commons-lang
+    artifact: commons-lang
+    current: 2.2
+    severity: MEDIUM
+    cves: ["CVE-2025-48924"]
+    paths: ["app/pentaho-pdi/license-installer/lib/commons-lang-2.2.jar", "app/pentaho/license-installer/lib/commons-lang-2.2.jar"]
+    reason: no fixed version reported (unfixable)
+  - lane: manual
+    group: commons-lang
+    artifact: commons-lang
+    current: 2.6
+    severity: MEDIUM
+    cves: ["CVE-2025-48924"]
+    paths: ["app/pentaho-pdi/data-integration/lib/commons-lang-2.6.jar", "app/pentaho-pdi/data-integration/plugins/pdi-projects-plugin/lib/commons-lang-2.6.jar", "app/pentaho-pdi/data-integration/plugins/rest-ee-plugin/lib/commons-lang-2.6.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/commons-lang/commons-lang/2.6/commons-lang-2.6.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/pdi-projects-plugin/lib/commons-lang-2.6.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/rest-ee-plugin/lib/commons-lang-2.6.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/pdi-projects-server-plugin/lib/commons-lang-2.6.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/commons-lang-2.6.jar"]
+    reason: no fixed version reported (unfixable)
+  - lane: manual
+    group: net.snowflake
+    artifact: snowflake-jdbc
+    current: 3.24.0
+    severity: LOW
+    cves: ["CVE-2026-3293"]
+    paths: ["app/pentaho-pdi/data-integration/lib/snowflake-jdbc-3.24.0.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/snowflake-jdbc-3.24.0.jar"]
+    reason: no fixed version reported (unfixable)
+  - lane: manual
+    group: ognl
+    artifact: ognl
+    current: 2.6.9
+    severity: MEDIUM
+    cves: ["CVE-2016-3093"]
+    paths: ["app/pentaho-pdi/data-integration/lib/ognl-2.6.9.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/ognl-2.6.9.jar"]
+    reason: "fixed versions only on a different major line: 3.0.12"
+  - lane: manual
+    group: org.apache.commons
+    artifact: commons-configuration2
+    current: 2.10.1
+    target: 2.15.0
+    jump: minor
+    severity: MEDIUM
+    cves: ["CVE-2026-45205"]
+    paths: ["app/pentaho-pdi/data-integration/lib/commons-configuration2-2.10.1.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/commons-configuration2-2.10.1.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (2.10.1 -> 2.15.0) - flagged for manual review
+  - lane: manual
+    group: org.apache.commons
+    artifact: commons-lang3
+    current: 3.14.0
+    target: 3.18.0
+    jump: minor
+    severity: MEDIUM
+    cves: ["CVE-2025-48924"]
+    paths: ["app/pentaho-pdi/data-integration/lib/commons-lang3-3.14.0.jar", "app/pentaho-pdi/data-integration/plugins/pentaho-reporting-plugins/lib/commons-lang3-3.14.0.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/app-shell/lib/commons-lang3-3.14.0.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/pentaho-reporting-plugins/lib/commons-lang3-3.14.0.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/commons-lang3-3.14.0.jar"]
+    symbolic_name: org.apache.commons.lang3
+    wrapped: false
+    osgi_source: true
+    candidates: ["3.18.0"]
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:org.apache.commons/commons-lang3/[3.12.0,3.18.0)", "replacement": "mvn:org.apache.commons/commons-lang3/3.18.0", "mode": "maven", "symbolicName": "org.apache.commons.lang3", "classifier": null, "feature_pins": ["3.12.0", "3.14.0", "3.18.0"]}
+    osgi_check: {"status": "pass", "violations": [], "pre_existing_violations": [], "evaluated_against": "3.18.0", "lockstep_members": 0}
+    accept_into: karaf
+    reason: minor version jump (3.14.0 -> 3.18.0) - flagged for manual review
+  - lane: manual
+    group: org.apache.commons
+    artifact: commons-lang3
+    current: 3.3.2
+    target: 3.18.0
+    jump: minor
+    severity: MEDIUM
+    cves: ["CVE-2025-48924"]
+    paths: ["app/pentaho-pdi/data-integration/plugins/python-executor/lib/commons-lang3-3.3.2.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/python-executor/lib/commons-lang3-3.3.2.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (3.3.2 -> 3.18.0) - flagged for manual review
+  - lane: manual
+    group: org.apache.commons
+    artifact: commons-lang3
+    current: 3.4
+    target: 3.18.0
+    jump: minor
+    severity: MEDIUM
+    cves: ["CVE-2025-48924"]
+    paths: ["app/pentaho-pdi/data-integration/plugins/smb/lib/commons-lang3-3.4.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/smb/lib/commons-lang3-3.4.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (3.4 -> 3.18.0) - flagged for manual review
+  - lane: manual
+    group: org.apache.commons
+    artifact: commons-lang3
+    current: 3.5
+    target: 3.18.0
+    jump: minor
+    severity: MEDIUM
+    cves: ["CVE-2025-48924"]
+    paths: ["app/pentaho-pdi/data-integration/plugins/pdi-copybook-plugin/lib/commons-lang3-3.5.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/pdi-copybook-plugin/lib/commons-lang3-3.5.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (3.5 -> 3.18.0) - flagged for manual review
+  - lane: manual
+    group: org.apache.cxf
+    artifact: cxf-core
+    current: 3.6.8
+    severity: CRITICAL
+    cves: ["CVE-2026-49875", "CVE-2026-50645"]
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/apache/cxf/cxf-core/3.6.8/cxf-core-3.6.8.jar"]
+    reason: "fixed versions only on a different major line: 4.1.7, 4.2.2"
+  - lane: manual
+    group: org.apache.httpcomponents.client5
+    artifact: httpclient5
+    current: 5.4.4
+    target: 5.6.3
+    jump: minor
+    severity: MEDIUM
+    cves: ["CVE-2026-64607"]
+    paths: ["app/pentaho-pdi/data-integration/lib/httpclient5-5.4.4.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/httpclient5-5.4.4.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (5.4.4 -> 5.6.3) - flagged for manual review
+  - lane: manual
+    group: org.apache.poi
+    artifact: poi-ooxml
+    current: 5.2.5
+    target: 5.4.0
+    jump: minor
+    severity: MEDIUM
+    family: poi
+    family_severity: MEDIUM
+    cves: ["CVE-2025-31672"]
+    paths: ["app/pentaho-pdi/data-integration/plugins/excel-plugins/lib/poi-ooxml-5.2.5.jar", "app/pentaho-pdi/data-integration/plugins/pdi-core-plugins/lib/poi-ooxml-5.2.5.jar", "app/pentaho-pdi/data-integration/plugins/pentaho-reporting-plugins/lib/poi-ooxml-5.2.5.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/excel-plugins/lib/poi-ooxml-5.2.5.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/pdi-core-plugins/lib/poi-ooxml-5.2.5.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/pentaho-reporting-plugins/lib/poi-ooxml-5.2.5.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/poi-ooxml-5.2.5.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (5.2.5 -> 5.4.0) - flagged for manual review
+  - lane: manual
+    group: org.bouncycastle
+    artifact: bcprov-jdk15to18
+    current: 1.84
+    target: 1.85
+    jump: minor
+    severity: CRITICAL
+    family: bouncycastle
+    family_severity: CRITICAL
+    cves: ["CVE-2026-13506", "CVE-2026-8763"]
+    paths: ["app/pentaho-pdi/data-integration/lib/bcprov-jdk15to18-1.84.jar", "app/pentaho-pdi/data-integration/plugins/smb/lib/bcprov-jdk15to18-1.84.jar", "app/pentaho-pdi/license-installer/lib/bcprov-jdk15to18-1.84.jar", "app/pentaho/license-installer/lib/bcprov-jdk15to18-1.84.jar", "app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/smb/lib/bcprov-jdk15to18-1.84.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/bcprov-jdk15to18-1.84.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (1.84 -> 1.85) - flagged for manual review
+  - lane: manual
+    group: org.bouncycastle
+    artifact: bcprov-jdk18on
+    current: 1.84
+    target: 1.85
+    jump: minor
+    severity: CRITICAL
+    family: bouncycastle
+    family_severity: CRITICAL
+    cves: ["CVE-2026-13506", "CVE-2026-8763"]
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/bouncycastle/bcprov-jdk18on/1.84/bcprov-jdk18on-1.84.jar"]
+    symbolic_name: bcprov
+    wrapped: true
+    osgi_source: true
+    candidates: ["1.85"]
+    processing: {"action": "extend", "existing_originalUri": "mvn:org.bouncycastle/bcprov-jdk18on/[1.84,1.85)", "originalUri": "mvn:org.bouncycastle/bcprov-jdk18on/[1.84,1.85)", "replacement": "mvn:org.bouncycastle/bcprov-jdk18on/1.85", "mode": "maven", "symbolicName": "bcprov", "classifier": null, "feature_pins": ["1.74", "1.78.1", "1.84"]}
+    osgi_check: {"status": "preserved-headers", "violations": [], "pre_existing_violations": [], "evaluated_against": "1.85", "lockstep_members": 2}
+    family_lockstep: [{"group": "org.bouncycastle", "artifact": "bcpkix-jdk18on", "current": "1.84", "must_move_to": "1.85", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/bouncycastle/bcpkix-jdk18on/1.84/bcpkix-jdk18on-1.84.jar", "osgi_source": true, "in_scan": false}, {"group": "org.bouncycastle", "artifact": "bcutil-jdk18on", "current": "1.84", "must_move_to": "1.85", "path": "app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/bouncycastle/bcutil-jdk18on/1.84/bcutil-jdk18on-1.84.jar", "osgi_source": true, "in_scan": false}]
+    accept_into: karaf
+    reason: minor version jump (1.84 -> 1.85) - flagged for manual review
+  - lane: jar
+    group: org.eclipse.angus
+    artifact: smtp
+    current: 2.0.3
+    target: 2.0.4
+    jump: patch
+    severity: MEDIUM
+    cves: ["CVE-2025-7962"]
+    paths: ["app/pentaho-pdi/data-integration/lib/webservices-rt-4.0.4.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/webservices-rt-4.0.4.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: hash match inside a differently-named jar (fat jar); file swap would drop unrelated classes
+  - lane: manual
+    group: org.eclipse.platform
+    artifact: org.eclipse.jface
+    current: 3.22.0
+    target: 3.31.0
+    jump: minor
+    severity: MEDIUM
+    cves: ["CVE-2023-4218"]
+    paths: ["app/pentaho-pdi/data-integration/lib/org.eclipse.jface-3.22.0.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/org.eclipse.jface-3.22.0.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (3.22.0 -> 3.31.0) - flagged for manual review
+  - lane: manual
+    group: org.glassfish
+    artifact: javax.el
+    current: 3.0.0
+    severity: MEDIUM
+    cves: ["CVE-2021-28170"]
+    paths: ["app/pentaho-pdi/data-integration/lib/javax.el-3.0.0.jar", "app/tomcat/webapps/pentaho/WEB-INF/lib/javax.el-3.0.0.jar"]
+    reason: no fixed version reported (unfixable)
+  - lane: manual
+    group: org.jsoup
+    artifact: jsoup
+    current: 1.22.2
+    target: 1.23.1
+    jump: minor
+    severity: MEDIUM
+    cves: ["CVE-2026-71497"]
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/app-shell/lib/jsoup-1.22.2.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (1.22.2 -> 1.23.1) - flagged for manual review
+  - lane: manual
+    group: org.springframework.data
+    artifact: spring-data-commons
+    current: 3.3.7
+    target: 3.5.12
+    jump: minor
+    severity: HIGH
+    family: spring
+    family_severity: HIGH
+    cves: ["CVE-2026-41711", "CVE-2026-41716", "CVE-2026-41721"]
+    paths: ["app/tomcat/webapps/pentaho/WEB-INF/lib/spring-data-commons-3.3.7.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (3.3.7 -> 3.5.12) - flagged for manual review
+  - lane: manual
+    group: org.springframework.ws
+    artifact: spring-ws-core
+    current: 4.0.12
+    target: 4.1.4
+    jump: minor
+    severity: HIGH
+    family: spring
+    family_severity: HIGH
+    cves: ["CVE-2026-40999"]
+    paths: ["app/pentaho-pdi/data-integration/plugins/scheduler-plugin/lib/spring-ws-core-4.0.12.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (4.0.12 -> 4.1.4) - flagged for manual review
+  - lane: manual
+    group: org.springframework.ws
+    artifact: spring-xml
+    current: 4.0.12
+    target: 4.1.4
+    jump: minor
+    severity: HIGH
+    family: spring
+    family_severity: HIGH
+    cves: ["CVE-2026-40998"]
+    paths: ["app/pentaho-pdi/data-integration/plugins/scheduler-plugin/lib/spring-xml-4.0.12.jar"]
+    fetchable: true
+    accept_into: jar
+    reason: minor version jump (4.0.12 -> 4.1.4) - flagged for manual review
+  - lane: karaf
+    group: com.fasterxml.jackson
+    artifact: jackson-annotations
+    current: 2.18.8
+    target: 2.18.11
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/core/jackson-annotations/2.18.8/jackson-annotations-2.18.8.jar"]
+    fetchable: true
+    accept_into: karaf
+    symbolic_name: com.fasterxml.jackson.core.jackson-annotations
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-annotations/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-annotations/2.18.11", "mode": "maven", "symbolicName": "com.fasterxml.jackson.core.jackson-annotations", "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: karaf
+    group: com.fasterxml.jackson
+    artifact: jackson-core
+    current: 2.18.8
+    target: 2.18.11
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/core/jackson-core/2.18.8/jackson-core-2.18.8.jar"]
+    fetchable: true
+    accept_into: karaf
+    symbolic_name: com.fasterxml.jackson.core.jackson-core
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-core/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-core/2.18.11", "mode": "maven", "symbolicName": "com.fasterxml.jackson.core.jackson-core", "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: karaf
+    group: com.fasterxml.jackson
+    artifact: jackson-databind
+    current: 2.18.8
+    target: 2.18.11
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/core/jackson-databind/2.18.8/jackson-databind-2.18.8.jar"]
+    fetchable: true
+    accept_into: karaf
+    symbolic_name: com.fasterxml.jackson.core.jackson-databind
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-databind/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-databind/2.18.11", "mode": "maven", "symbolicName": "com.fasterxml.jackson.core.jackson-databind", "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: karaf
+    group: com.fasterxml.jackson
+    artifact: jackson-jaxrs-base
+    current: 2.18.8
+    target: 2.18.11
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/jaxrs/jackson-jaxrs-base/2.18.8/jackson-jaxrs-base-2.18.8.jar"]
+    fetchable: true
+    accept_into: karaf
+    symbolic_name: com.fasterxml.jackson.jaxrs.jackson-jaxrs-base
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-jaxrs-base/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-jaxrs-base/2.18.11", "mode": "maven", "symbolicName": "com.fasterxml.jackson.jaxrs.jackson-jaxrs-base", "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: karaf
+    group: com.fasterxml.jackson
+    artifact: jackson-jaxrs-json-provider
+    current: 2.18.8
+    target: 2.18.11
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/jaxrs/jackson-jaxrs-json-provider/2.18.8/jackson-jaxrs-json-provider-2.18.8.jar"]
+    fetchable: true
+    accept_into: karaf
+    symbolic_name: com.fasterxml.jackson.jaxrs.jackson-jaxrs-json-provider
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-jaxrs-json-provider/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-jaxrs-json-provider/2.18.11", "mode": "maven", "symbolicName": "com.fasterxml.jackson.jaxrs.jackson-jaxrs-json-provider", "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: karaf
+    group: com.fasterxml.jackson
+    artifact: jackson-module-jaxb-annotations
+    current: 2.18.8
+    target: 2.18.11
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/com/fasterxml/jackson/module/jackson-module-jaxb-annotations/2.18.8/jackson-module-jaxb-annotations-2.18.8.jar"]
+    fetchable: true
+    accept_into: karaf
+    symbolic_name: com.fasterxml.jackson.module.jackson-module-jaxb-annotations
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-module-jaxb-annotations/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-module-jaxb-annotations/2.18.11", "mode": "maven", "symbolicName": "com.fasterxml.jackson.module.jackson-module-jaxb-annotations", "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: karaf
+    group: com.fasterxml.jackson
+    artifact: jackson-dataformat-yaml
+    current: 2.14.1
+    target: 2.18.11
+    jump: minor
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/hitachivantara/jackson-dataformat-yaml/2.14.1/jackson-dataformat-yaml-2.14.1.jar"]
+    fetchable: true
+    accept_into: karaf
+    symbolic_name: org.hitachivantara.jackson-dataformat-yaml
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-dataformat-yaml/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-dataformat-yaml/2.18.11", "mode": "maven", "symbolicName": "org.hitachivantara.jackson-dataformat-yaml", "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: jar
+    group: com.fasterxml.jackson
+    artifact: jackson-dataformat-cbor
+    current: 2.18.8
+    target: 2.18.11
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/amazon-redshift/lib/jackson-dataformat-cbor-2.18.8.jar"]
+    fetchable: true
+    accept_into: jar
+    symbolic_name: null
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-dataformat-cbor/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-dataformat-cbor/2.18.11", "mode": "maven", "symbolicName": null, "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: jar
+    group: com.fasterxml.jackson
+    artifact: jackson-dataformat-xml
+    current: 2.10.1
+    target: 2.18.11
+    jump: minor
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/azure-datalake1-vfs/lib/jackson-dataformat-xml-2.10.1.jar"]
+    fetchable: true
+    accept_into: jar
+    symbolic_name: null
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-dataformat-xml/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-dataformat-xml/2.18.11", "mode": "maven", "symbolicName": null, "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: jar
+    group: com.fasterxml.jackson
+    artifact: jackson-datatype-jsr310
+    current: 2.18.8
+    target: 2.18.11
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/azure-datalake1-vfs/lib/jackson-datatype-jsr310-2.18.8.jar"]
+    fetchable: true
+    accept_into: jar
+    symbolic_name: null
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-datatype-jsr310/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-datatype-jsr310/2.18.11", "mode": "maven", "symbolicName": null, "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: jar
+    group: com.fasterxml.jackson
+    artifact: jackson-module-jaxb-annotations
+    current: 2.10.1
+    target: 2.18.11
+    jump: minor
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/kettle/plugins/azure-datalake1-vfs/lib/jackson-module-jaxb-annotations-2.10.1.jar"]
+    fetchable: true
+    accept_into: jar
+    symbolic_name: null
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-module-jaxb-annotations/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-module-jaxb-annotations/2.18.11", "mode": "maven", "symbolicName": null, "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: jar
+    group: com.fasterxml.jackson
+    artifact: jackson-jakarta-rs-base
+    current: 2.18.8
+    target: 2.18.11
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho-pdi/data-integration/lib/jackson-jakarta-rs-base-2.18.8.jar"]
+    fetchable: true
+    accept_into: jar
+    symbolic_name: null
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-jakarta-rs-base/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-jakarta-rs-base/2.18.11", "mode": "maven", "symbolicName": null, "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: jar
+    group: com.fasterxml.jackson
+    artifact: jackson-jakarta-rs-json-provider
+    current: 2.18.8
+    target: 2.18.11
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho-pdi/data-integration/lib/jackson-jakarta-rs-json-provider-2.18.8.jar"]
+    fetchable: true
+    accept_into: jar
+    symbolic_name: null
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-jakarta-rs-json-provider/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-jakarta-rs-json-provider/2.18.11", "mode": "maven", "symbolicName": null, "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: jar
+    group: com.fasterxml.jackson
+    artifact: jackson-module-jakarta-xmlbind-annotations
+    current: 2.18.8
+    target: 2.18.11
+    jump: patch
+    severity: HIGH
+    family: jackson
+    family_severity: HIGH
+    lockstep_with: com.fasterxml.jackson.core/jackson-core
+    paths: ["app/pentaho-pdi/data-integration/lib/jackson-module-jakarta-xmlbind-annotations-2.18.8.jar"]
+    fetchable: true
+    accept_into: jar
+    symbolic_name: null
+    processing: {"action": "add", "existing_originalUri": null, "originalUri": "mvn:com.fasterxml.jackson/jackson-module-jakarta-xmlbind-annotations/[0,2.18.11)", "replacement": "mvn:com.fasterxml.jackson/jackson-module-jakarta-xmlbind-annotations/2.18.11", "mode": "maven", "symbolicName": null, "classifier": null, "feature_pins": []}
+    reason: family lockstep with jackson-core (2.18.8 -> 2.18.11); no CVE on this member
+  - lane: karaf
+    group: org.bouncycastle
+    artifact: bcpkix-jdk18on
+    current: 1.84
+    target: 1.85
+    jump: minor
+    severity: CRITICAL
+    family: bouncycastle
+    family_severity: CRITICAL
+    lockstep_with: org.bouncycastle/bcprov-jdk18on
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/bouncycastle/bcpkix-jdk18on/1.84/bcpkix-jdk18on-1.84.jar"]
+    fetchable: true
+    accept_into: karaf
+    symbolic_name: bcpkix
+    processing: {"action": "extend", "existing_originalUri": "mvn:org.bouncycastle/bcpkix-jdk18on/[1.84,1.85)", "originalUri": "mvn:org.bouncycastle/bcpkix-jdk18on/[1.84,1.85)", "replacement": "mvn:org.bouncycastle/bcpkix-jdk18on/1.85", "mode": "maven", "symbolicName": "bcpkix", "classifier": null, "feature_pins": ["1.74", "1.84"]}
+    reason: family lockstep with bcprov-jdk18on (1.84 -> 1.85); no CVE on this member
+  - lane: karaf
+    group: org.bouncycastle
+    artifact: bcutil-jdk18on
+    current: 1.84
+    target: 1.85
+    jump: minor
+    severity: CRITICAL
+    family: bouncycastle
+    family_severity: CRITICAL
+    lockstep_with: org.bouncycastle/bcprov-jdk18on
+    paths: ["app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/bouncycastle/bcutil-jdk18on/1.84/bcutil-jdk18on-1.84.jar"]
+    fetchable: true
+    accept_into: karaf
+    symbolic_name: bcutil
+    processing: {"action": "extend", "existing_originalUri": "mvn:org.bouncycastle/bcutil-jdk18on/[1.84,1.85)", "originalUri": "mvn:org.bouncycastle/bcutil-jdk18on/[1.84,1.85)", "replacement": "mvn:org.bouncycastle/bcutil-jdk18on/1.85", "mode": "maven", "symbolicName": "bcutil", "classifier": null, "feature_pins": ["1.74", "1.78.1", "1.84"]}
+    reason: family lockstep with bcprov-jdk18on (1.84 -> 1.85); no CVE on this member

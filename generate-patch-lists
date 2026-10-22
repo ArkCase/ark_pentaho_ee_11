@@ -1,0 +1,597 @@
+#!/usr/bin/env python3
+
+# Consumes a Trivy JSON report and writes ONE YAML patch file that
+# apply-patch-lists consumes during the container build.
+#
+#   ./generate-patch-lists <vulnerabilities.json> <root> [--out patches.yaml]
+#                          [--levels HIGH,CRIT] [--strict] [--no-osgi-check] [--no-osgi-fail]
+#
+#   <vulnerabilities.json>  the Trivy report. Produced by scan.sh, or assembled
+#                           and committed by hand - either is fine. Nothing is
+#                           auto-discovered: the file is always a parameter.
+#   <root>                  ABSOLUTE path to the container filesystem that is
+#                           analysed (jar paths, manifests, feature pins). It is
+#                           NOT recorded: entry paths are written relative to the
+#                           filesystem root because that is how Trivy reports them,
+#                           so at build time app/tomcat/... is /app/tomcat/...
+#                           Point it at the extracted snapshot to work locally.
+#   --levels LIST         severity levels recorded for apply-patch-lists (default
+#                           HIGH,CRIT). CRIT/CRITICAL, HIGH, MED/MEDIUM, LOW,
+#                           UNK/UNKNOWN, ALL.
+#   --no-osgi-fail        report OSGi violations as warnings instead of exiting 1.
+#                           Default: fail. Nothing is recorded: the applier fails on a
+#                           violation unless it is given --no-osgi-fail too.
+#   --strict              records settings.strict_sha1: true, so the applier aborts on
+#                           sha1 mismatch instead of warning. The applier is lenient by
+#                           default, which is right for local iteration; a CI build
+#                           should generate with --strict.
+#   --no-osgi-check       skip the OSGi import-package check. It runs BY DEFAULT:
+#                           for every candidate bump, walk the consumers in the
+#                           karaf system repo, check each Import-Package range
+#                           against the package version that would be exported AFTER
+#                           the bump, record the result on the entry as osgi_check,
+#                           and exit non-zero if a bump would break a consumer. A
+#                           failing entry goes to manual instead of being executed,
+#                           so this check is the reason something is or is not safe
+#                           to automate. Skipping it records entries as unproven.
+#
+# Output sections:
+#   karaf:   feature-resolvable bundles inside karaf's local Maven repo
+#   jars:    plain jars on flat classpaths (file swaps)
+#   manual:  entries the applier will not act on, each with its reason
+#
+# `manual:` is the decision area. Every block there is complete and ready to run:
+# copy it into `karaf:` or `jars:` to accept it, or set `accept: true` on it.
+# Only the karaf/jars sections are executed; manual blocks are printed as a
+# pending-review list.
+#
+# Rules:
+#   - target = smallest FixedVersion candidate on the same major line as the
+#     installed version.
+#   - patch-level jumps are automatable; a minor or major jump is flagged for
+#     manual review.
+#   - tightly related bundles must move in lockstep: within a family (BouncyCastle,
+#     Log4J2, Jetty, Netty, Jackson, Spring, POI) every member on the same release
+#     line has to move to the same version as the patched one, because consumers
+#     pin import ranges against the family version. Companions are emitted as
+#     full entries (same lane as the trigger) so nothing is left half-moved.
+#   - every entry carries the severity of its CVEs; each family line carries the
+#     highest severity found in that family as `family_severity`, because a family
+#     is decided as a group. apply-patch-lists filters on that.
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+import zipfile
+from collections import defaultdict
+
+VENDOR_GROUPS = ('org.pentaho', 'org.hitachivantara')
+
+# Severity names as Trivy spells them, plus the short forms the user asked for.
+SEV_RANK = {'CRITICAL': 5, 'HIGH': 4, 'MEDIUM': 3, 'LOW': 2, 'UNKNOWN': 1}
+SEV_ALIAS = {'CRIT': 'CRITICAL', 'CRITICAL': 'CRITICAL', 'HIGH': 'HIGH',
+             'MED': 'MEDIUM', 'MEDIUM': 'MEDIUM', 'LOW': 'LOW',
+             'UNK': 'UNKNOWN', 'UNKNOWN': 'UNKNOWN'}
+DEFAULT_LEVELS = 'HIGH,CRIT'            # what the applier patches unless told otherwise
+
+
+def sev_name(s):
+    return SEV_ALIAS.get((s or '').strip().upper(), 'UNKNOWN')
+
+
+def sev_level_set(csv):
+    """Comma-separated severity levels -> set of canonical names ('ALL' passes through)."""
+    out = set()
+    for part in (csv or '').split(','):
+        part = part.strip().upper()
+        if not part:
+            continue
+        if part == 'ALL':
+            out.add('ALL')
+        else:
+            out.add(SEV_ALIAS.get(part, part))
+    return out
+
+
+def max_sev(names):
+    return max(names, key=lambda s: SEV_RANK.get(s, 0)) if names else 'UNKNOWN'
+
+FAMILIES = {
+    'bouncycastle': 'org.bouncycastle',
+    'log4j2':       'org.apache.logging.log4j',
+    'jetty':        'org.eclipse.jetty',
+    'netty':        'io.netty',
+    'jackson':      'com.fasterxml.jackson',
+    'spring':       'org.springframework',
+    'poi':          'org.apache.poi',
+}
+# artifact-name prefixes so family members are found on disk even when Trivy
+# did not flag them (a family member with no CVE still has to move with the group)
+FAM_PREFIXES = {
+    'bouncycastle': ('bc',),
+    'log4j2':       ('log4j',),
+    'jetty':        ('jetty',),
+    'netty':        ('netty',),
+    'jackson':      ('jackson',),
+    'spring':       ('spring',),
+    'poi':          ('poi',),
+}
+
+KARAF_SUB = 'app/pentaho/pentaho-server/pentaho-solutions/system/karaf'
+JAR_RE = re.compile(r'^(?P<art>.+)-(?P<ver>\d[\d.]*)\.jar$')
+
+
+def family_of(group):
+    for name, prefix in FAMILIES.items():
+        if group == prefix or group.startswith(prefix + '.'):
+            return name
+    return None
+
+
+def family_of_artifact(name):
+    for fam, prefixes in FAM_PREFIXES.items():
+        if any(name.startswith(p) for p in prefixes):
+            return fam
+    return None
+
+
+def release_line(artifact):
+    """Release line within a family: jdk18on vs jdk15to18 vs fips, or the family itself."""
+    m = re.search(r'-(jdk\d+\w*|fips)$', artifact)
+    return m.group(1) if m else 'main'
+
+
+def vtuple(s):
+    return tuple(int(p) for p in re.findall(r'\d+', s)) or (0,)
+
+
+def vstr(t):
+    return '.'.join(str(x) for x in t)
+
+
+def jump_kind(cur, tgt):
+    a, b = vtuple(cur), vtuple(tgt)
+    if a[0] != b[0]:
+        return 'major'
+    if len(a) < 2 or len(b) < 2 or a[1] != b[1]:
+        return 'minor'
+    return 'patch'
+
+
+def manifest(jar_path):
+    try:
+        with zipfile.ZipFile(jar_path) as z:
+            raw = z.read('META-INF/MANIFEST.MF').decode('utf-8', 'replace')
+    except Exception:
+        return None
+    lines = []
+    for line in raw.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
+        if line.startswith(' '):          # continuation line (72-char folding)
+            if lines:
+                lines[-1] += line[1:]
+        elif line:
+            lines.append(line)
+    return dict((l.split(':', 1)[0], l.split(':', 1)[1].strip()) for l in lines if ':' in l)
+
+
+def clauses(s):
+    # OSGi header clauses are comma-separated, but version ranges [a,b) contain
+    # commas themselves; split only outside the brackets.
+    out, cur, inb = [], '', False
+    for ch in s:
+        if ch == '[': inb = True
+        elif ch == ']': inb = False
+        if ch == ',' and not inb:
+            if cur.strip(): out.append(cur.strip())
+            cur = ''
+        else:
+            cur += ch
+    if cur.strip(): out.append(cur.strip())
+    return out
+
+
+def parse_range(rng):
+    if not rng:
+        return None
+    m = re.match(r'^\[(.+?),(.+?)([)\]])$', rng)
+    if m:
+        return (vtuple(m.group(1)), vtuple(m.group(2)), m.group(3) == ']')
+    return (vtuple(rng), None, False)
+
+
+def satisfies(rng, ver):
+    p = parse_range(rng)
+    if p is None:
+        return True
+    lo, hi, closed = p
+    v = vtuple(ver)
+    if lo and v < lo:
+        return False
+    if hi and (v > hi or (v == hi and not closed)):
+        return False
+    return True
+
+
+def export_versions(man):
+    ver = man.get('Bundle-Version', '0')
+    out = {}
+    for clause in clauses(man.get('Export-Package') or ''):
+        pkg = clause.split(';')[0].strip()
+        m = re.search(r'version="([^"]+)"', clause)
+        out[pkg] = m.group(1) if m else ver
+    return out
+
+
+def imports_of(man):
+    out = []
+    for c in clauses(man.get('Import-Package', '')):
+        pkg = c.split(';')[0]
+        m = re.search(r'version="([^"]+)"', c)
+        out.append((pkg, m.group(1) if m else None))
+    return out
+
+
+def scalar(v):
+    if isinstance(v, (dict, list)):
+        return json.dumps(v)                 # JSON is valid YAML flow style: parses anywhere
+    if isinstance(v, bool):
+        return 'true' if v else 'false'
+    if v is None:
+        return 'null'
+    s = str(v)
+    if re.search(r'[\n#:]|^\s|\s$', s):
+        return json.dumps(s)
+    return json.dumps(s) if (s == '' or s.lower() in ('true', 'false', 'null', 'yes', 'no')) else s
+
+
+def yaml_dump(data):
+    out = []
+    for key, val in data.items():
+        out.append('%s:' % key)
+        if isinstance(val, dict):
+            for k, v in val.items():
+                out.append('  %s: %s' % (k, scalar(v)))
+        else:
+            for e in val:
+                first = True
+                for k, v in e.items():
+                    out.append(('%s%s: %s' % ('  - ' if first else '    ', k, scalar(v))))
+                    first = False
+    return '\n'.join(out) + '\n'
+
+
+def main():
+    ap = argparse.ArgumentParser(description='Turn a Trivy JSON scan into a committed YAML patch list.')
+    ap.add_argument('input', help='path to the Trivy JSON report (no default - must be given)')
+    ap.add_argument('root', help='ABSOLUTE path of the container filesystem that is analysed; not recorded in the output file')
+    ap.add_argument('--out', default='patches.yaml', help='output patch file')
+    ap.add_argument('--levels', default=DEFAULT_LEVELS,
+                    help='severity levels the applier should patch (recorded in settings.levels; '
+                         'HIGH/CRIT or CRITICAL, MED or MEDIUM, LOW, UNK or UNKNOWN, ALL)')
+    ap.add_argument('--strict', action='store_true',
+                    help='record strict sha1 in the file: the applier aborts on mismatch instead of warning')
+    ap.add_argument('--no-osgi-check', action='store_true', dest='no_osgi_check',
+                    help='skip the OSGi import-package check; it runs by default')
+    ap.add_argument('--no-osgi-fail', action='store_true', dest='no_osgi_fail',
+                    help='warn on OSGi violations instead of exiting 1; nothing is recorded, '
+                         'so the applier still fails by default')
+    args = ap.parse_args()
+
+    if not os.path.isabs(args.root):
+        ap.error('root must be an absolute path within the container (e.g. /, or the absolute path of the extracted snapshot)')
+
+    report = json.load(open(args.input))
+    results = report.get('Results') or report.get('results') or []
+    root = args.root
+    karaf_root = os.path.join(root, KARAF_SUB)
+    karaf_system = os.path.join(karaf_root, 'system')
+    processing_file = os.path.join(karaf_root, 'etc/org.apache.karaf.features.xml')
+    processing_text = open(processing_file).read() if os.path.exists(processing_file) else ''
+    feature_xmls = [os.path.join(d, f) for d, _, fs in os.walk(karaf_system) for f in fs if f.endswith('.xml')]
+    feature_text = '\n'.join(open(x).read() for x in feature_xmls)
+
+    # ---- hits ----
+    hits = {}
+    for res in results:
+        for v in (res.get('Vulnerabilities') or res.get('vulnerabilities') or []):
+            purl = (v.get('PkgIdentifier') or {}).get('PURL') or v.get('Purl') or ''
+            m = re.match(r'pkg:maven/([^/]+)/([^@]+)@([^+]+)', purl)
+            if not m:
+                continue
+            key = (m.group(1), m.group(2), m.group(3), v.get('PkgPath') or v.get('FilePath') or '')
+            hits.setdefault(key, {'group': m.group(1), 'artifact': m.group(2),
+                                  'current': v.get('InstalledVersion') or m.group(3),
+                                  'path': key[3], 'cves': [], 'status': v.get('Status'),
+                                  'severity': sev_name(v.get('Severity')),
+                                  'fixed': (v.get('FixedVersion') or '').strip()})
+            hits[key]['cves'].append(v.get('VulnerabilityID'))
+
+    artifacts = defaultdict(list)
+    for h in hits.values():
+        artifacts[(h['group'], h['artifact'], h['current'])].append(h)
+
+    # highest severity found anywhere in a family line; a family is decided as a
+    # group, so every member of the line inherits that group severity
+    fam_sev = {}
+    for h in hits.values():
+        fam = family_of(h['group'])
+        if not fam:
+            continue
+        key = (fam, release_line(h['artifact']))
+        if SEV_RANK[h['severity']] > SEV_RANK.get(fam_sev.get(key, ''), 0):
+            fam_sev[key] = h['severity']
+
+    # ---- family members, including ones Trivy did not flag ----
+    members = defaultdict(list)        # (family, line) -> [(group, artifact, version, path, in_scan)]
+    seen_member = set()
+    for h in hits.values():
+        fam = family_of(h['group'])
+        if not fam:
+            continue
+        key = (fam, release_line(h['artifact']), h['group'], h['artifact'], h['current'])
+        if key not in seen_member:
+            seen_member.add(key)
+            members[(fam, release_line(h['artifact']))].append((h['group'], h['artifact'], h['current'], h['path'], True))
+    for dirpath, dirs, files in os.walk(root):
+        for f in files:
+            if not f.endswith('.jar'):
+                continue
+            m = JAR_RE.match(f)
+            if not m:
+                continue
+            fam = family_of_artifact(m.group('art'))
+            if not fam:
+                continue
+            p = os.path.relpath(os.path.join(dirpath, f), root)
+            key = (fam, release_line(m.group('art')), FAMILIES[fam], m.group('art'), m.group('ver'))
+            if key not in seen_member:
+                seen_member.add(key)
+                members[(fam, release_line(m.group('art')))].append((FAMILIES[fam], m.group('art'), m.group('ver'), p, False))
+
+    # ---- consumer picture (OSGi) ----
+    exports = {}
+    consumers = []
+    for dirpath, _, files in os.walk(karaf_system):
+        for f in files:
+            if not f.endswith('.jar'):
+                continue
+            p = os.path.join(dirpath, f)
+            man = manifest(p)
+            if not man:
+                continue
+            bsn = man.get('Bundle-SymbolicName', '').split(';')[0]
+            for pkg, ver in export_versions(man).items():
+                exports.setdefault(pkg, (bsn, ver, p))
+            for pkg, rng in imports_of(man):
+                consumers.append((bsn, pkg, rng, p, man))
+
+    karaf_entries, jar_entries, manual, already = [], [], [], []
+    pin_re = lambda g, a: re.compile(r'mvn:%s/%s/([0-9][^/<]*)(?:/([a-zA-Z][^/>]*))?' % (re.escape(g), re.escape(a)))
+
+    def processing_block(group, artifact, target, bsn, wrapped):
+        pins = set()
+        for pm in pin_re(group, artifact).findall(feature_text):
+            pins.add(pm)
+        classifier = next((c for _, c in sorted(pins) if c), None)
+        ex = re.search(r'originalUri="mvn:%s/%s/\[([^],]+),([^)\]]+)\)"' % (re.escape(group), re.escape(artifact)), processing_text)
+        lo = vtuple(ex.group(1)) if ex else min((vtuple(p) for p, _ in pins), default=(0,))
+        suffix = ('/' + classifier) if classifier else ''
+        return {
+            'action': 'extend' if ex else 'add',
+            'existing_originalUri': 'mvn:%s/%s/[%s,%s)' % (group, artifact, ex.group(1), ex.group(2)) if ex else None,
+            'originalUri': 'mvn:%s/%s/[%s,%s)%s' % (group, artifact, vstr(lo), target, suffix),
+            'replacement': 'mvn:%s/%s/%s%s' % (group, artifact, target, suffix),
+            'mode': 'maven',
+            'symbolicName': bsn or None,
+            'classifier': classifier,
+            'feature_pins': sorted('%s%s' % (v, '/' + c if c else '') for v, c in pins),
+        }
+
+    SEEN = set()
+
+
+    def entry(rec, lane, extra=None):
+        key = (lane, rec['group'], rec['artifact'], rec['current'])
+        if key in SEEN:
+            return None
+        SEEN.add(key)
+        e = {'lane': lane, 'group': rec['group'], 'artifact': rec['artifact'],
+             'current': rec['current'], 'target': rec.get('target'), 'jump': rec.get('jump'),
+             'severity': rec.get('severity'),
+             'family': family_of(rec['group']),
+             'family_severity': fam_sev.get((family_of(rec['group']), release_line(rec['artifact']))),
+             'cves': sorted(rec['cves']),
+             'paths': sorted(rec['paths'])}
+        if extra:
+            e.update(extra)
+        return {k: v for k, v in e.items() if v not in (None, [], '')}
+
+    for (group, artifact, current), hs in sorted(artifacts.items()):
+        statuses = {h['status'] for h in hs}
+        fixed = next((h['fixed'] for h in hs if h['fixed']), '')
+        paths = sorted(h['path'] for h in hs)
+        base = {'group': group, 'artifact': artifact, 'current': current, 'paths': paths,
+                'severity': max_sev(h['severity'] for h in hs),
+                'cves': sorted({c for h in hs for c in h['cves']})}
+        if 'fixed' not in statuses or not fixed:
+            manual.append({**entry(base, 'manual'), 'reason': 'no fixed version reported (unfixable)'})
+            continue
+        candidates = sorted((c.strip() for c in fixed.split(',')), key=vtuple)
+        same_major = [c for c in candidates if vtuple(c)[0] == vtuple(current)[0]]
+        if not same_major:
+            manual.append({**entry(base, 'manual'),
+                           'reason': 'fixed versions only on a different major line: ' + ', '.join(candidates)})
+            continue
+        target = same_major[0]
+        if vtuple(target) <= vtuple(current):
+            already.append({**base, 'reported_fixed': target})
+            continue
+        jump = jump_kind(current, target)
+        rec = {**base, 'target': target, 'jump': jump}
+        karaf_paths = [p for p in rec['paths'] if '/system/karaf/system/' in p]
+        plain_paths = [p for p in rec['paths'] if '/system/karaf/system/' not in p]
+
+        extra = {}
+        chk = {'status': 'skipped' if args.no_osgi_check else 'pass',
+               'violations': [], 'pre_existing_violations': []}
+        if karaf_paths:
+            jar_path = os.path.join(root, karaf_paths[0])
+            man = manifest(jar_path) if os.path.exists(jar_path) else None
+            bsn = man.get('Bundle-SymbolicName', '').split(';')[0] if man else ''
+            norm = artifact.replace('-', '')
+            native = bsn and (norm in bsn.replace('.', '').replace('-', '') or bsn.startswith(group))
+            wrapped = bool(bsn) and not native
+            mine = export_versions(man) if man else {}
+            if not args.no_osgi_check:
+                for cb, pkg, rng, cp, cm in consumers:
+                    if pkg not in mine or cp == jar_path:      # OSGi ignores self-imports
+                        continue
+                    before = mine[pkg]
+                    after = before if wrapped else target      # rewrap preserves Export-Package verbatim
+                    if satisfies(rng, after):
+                        continue
+                    rec_v = {'consumer': cb, 'pkg': pkg, 'range': rng,
+                             'exported_before': before, 'exported_after': after}
+                    (chk['pre_existing_violations'] if not satisfies(rng, before) else chk['violations']).append(rec_v)
+                chk['evaluated_against'] = target
+                chk['status'] = 'fail' if chk['violations'] else 'pass'
+                if wrapped and not chk['violations']:
+                    chk['status'] = 'preserved-headers'
+            extra = {'symbolic_name': bsn or None, 'wrapped': wrapped,
+                     'osgi_source': bool(bsn), 'candidates': candidates,
+                     'processing': processing_block(group, artifact, target, bsn, wrapped),
+                     'osgi_check': chk}
+
+        # ---- family lockstep: members on the same family line and major ----
+        fam = family_of(group)
+        companions, cross_major = [], []
+        if fam:
+            line = release_line(artifact)
+            for g, a, ver, pth, in_scan in members[(fam, line)]:
+                if (g, a, ver) == (group, artifact, current):
+                    continue
+                if vtuple(ver) == vtuple(target):
+                    continue
+                if vtuple(ver)[0] != vtuple(target)[0]:
+                    cross_major.append('%s %s' % (a, ver))
+                    continue
+                companions.append({'group': g, 'artifact': a, 'current': ver,
+                                   'must_move_to': target, 'path': pth,
+                                   'osgi_source': '/system/karaf/system/' in pth,
+                                   'in_scan': in_scan})
+        if companions:
+            extra['family_lockstep'] = companions
+        if cross_major:
+            extra['family_other_majors'] = sorted(cross_major)
+        chk['lockstep_members'] = len(companions)
+
+        reason = None
+        if jump != 'patch':
+            reason = '%s version jump (%s -> %s) - flagged for manual review' % (jump, current, target)
+        elif chk['violations']:
+            reason = 'import-range violation introduced by the bump'
+        elif companions:
+            reason = 'family lockstep: %d %s member(s) on line %s must move to %s with it' % (len(companions), fam, line, target)
+
+        if karaf_paths:
+            e = entry(rec, 'manual' if reason else 'karaf',
+                      dict(extra, accept_into='karaf'))
+            if e is not None:
+                if reason:
+                    e['reason'] = reason
+                (manual if reason else karaf_entries).append(e)
+        if plain_paths:
+            e = entry(rec, 'manual' if reason else 'jar',
+                      {'fetchable': True, 'accept_into': 'jar'})
+            if e is not None:
+                if any(os.path.basename(p) != '%s-%s.jar' % (artifact, current) for p in plain_paths):
+                    e['reason'] = 'hash match inside a differently-named jar (fat jar); file swap would drop unrelated classes'
+                elif group.startswith(VENDOR_GROUPS):
+                    e['reason'] = 'vendor artifact, not fetchable from Maven Central; needs the vendor release'
+                elif reason:
+                    e['reason'] = reason
+                else:
+                    e.pop('reason', None)
+                (manual if e.get('reason') else jar_entries).append(e)
+
+    # ---- companion blocks, same shape as everything else so they can be
+    #       copy-pasted between sections ----
+    emitted = {(e['group'], e['artifact'], e['current']) for e in karaf_entries + jar_entries + manual}
+    for parent in karaf_entries + jar_entries + manual:
+        fam = parent.get('family')
+        if not fam:
+            continue
+        for c in parent.get('family_lockstep', []):
+            key = (c['group'], c['artifact'], c['current'])
+            if key in emitted:
+                continue
+            emitted.add(key)
+            lane = 'karaf' if c['osgi_source'] else 'jar'
+            gsev = fam_sev.get((fam, release_line(parent['artifact'])))
+            man = manifest(os.path.join(root, c['path'])) if c['osgi_source'] and os.path.exists(os.path.join(root, c['path'])) else None
+            bsn = man.get('Bundle-SymbolicName', '').split(';')[0] if man else ''
+            block = {'lane': lane, 'group': c['group'], 'artifact': c['artifact'],
+                     'current': c['current'], 'target': c['must_move_to'],
+                     'jump': jump_kind(c['current'], c['must_move_to']),
+                     'severity': gsev, 'family': fam, 'family_severity': gsev,
+                     'lockstep_with': '%s/%s' % (parent['group'], parent['artifact']),
+                     'paths': [c['path']], 'fetchable': True, 'accept_into': lane,
+                     'symbolic_name': bsn or None,
+                     'processing': processing_block(c['group'], c['artifact'], c['must_move_to'], bsn, bool(bsn)),
+                     'reason': 'family lockstep with %s (%s -> %s); no CVE on this member'
+                               % (parent['artifact'], parent['current'], parent['target'])}
+            if parent.get('reason') or parent.get('jump') != 'patch':
+                manual.append(block)
+            else:
+                (karaf_entries if lane == 'karaf' else jar_entries).append(block)
+
+    fam_max = {}
+    for (fam, _), s in fam_sev.items():
+        if SEV_RANK[s] > SEV_RANK.get(fam_max.get(fam, ''), 0):
+            fam_max[fam] = s
+
+    header = {'generator': 'generate-patch-lists', 'source': args.input,
+             'source_sha256': hashlib.sha256(open(args.input, 'rb').read()).hexdigest(),
+             'scan_artifact': report.get('ArtifactName'),
+             'target_rule': 'smallest fixed candidate on the same major line; patch-level jumps only',
+             'families': sorted(FAMILIES),
+             'family_severity': {f: fam_max.get(f) for f in sorted(FAMILIES)}}
+    settings = {'levels': args.levels,                         # severity levels the applier patches
+                'feature_processing': True,      # features.cfg line must be active or the file is ignored
+                'strict_sha1': bool(args.strict)}  # default lenient: sha1 mismatch warns; --strict makes it fatal
+    open(args.out, 'w').write(yaml_dump({'settings': settings, 'header': header,
+                                         'karaf': karaf_entries,
+                                         'jars': jar_entries,
+                                         'manual': manual}))
+
+    print('karaf lane : %d entries' % len(karaf_entries))
+    print('jar lane   : %d entries' % len(jar_entries))
+    print('manual     : %d entries' % len(manual))
+    print('levels      : %s' % args.levels)
+    print('root        : %s (analysis only - not recorded, paths stay root-relative)' % root)
+    if already:
+        print('already at reported fixed version: %d entries' % len(already))
+    for e in already:
+        print('  SKIP %s/%s %s (reported fixed %s) %s' % (e['group'], e['artifact'], e['current'], e['reported_fixed'], e['paths'][0]))
+    for e in manual:
+        print('REVIEW %s/%s %s -> %s [%s] %s %s' % (e['group'], e['artifact'], e.get('current'), e.get('target'),
+                                                    e.get('jump', '-'),
+                                                    e.get('severity') or e.get('family_severity') or '-',
+                                                    e.get('reason', '')))
+    fails = [e for e in karaf_entries + manual if (e.get('osgi_check') or {}).get('status') == 'fail']
+    if not args.no_osgi_check:
+        for e in fails:
+            print('%s %s/%s %s -> %s : %s' % ('OSGI CHECK FAIL' if not args.no_osgi_fail else 'OSGI CHECK WARN',
+                                              e['group'], e['artifact'], e['current'], e['target'],
+                                              json.dumps(e['osgi_check']['violations'])))
+        if fails and not args.no_osgi_fail:
+            sys.exit(1)
+    else:
+        print('osgi check skipped: entries are recorded unproven')
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,652 @@
+#!/usr/bin/env python3
+#
+# Build-time applier. Reads one committed patch file written by
+# generate-patch-lists and applies it during the container build, so the
+# patched artifacts are baked into the image.
+#
+#   ./apply-patch-lists <patches.yaml> [--levels HIGH,CRIT] [--ignore MED,LOW]
+#                       [--snapshot DIR] [--dry-run] [--check] [--strict]
+#                       [--no-osgi-check] [--no-osgi-fail]
+#
+#   <patches.yaml>  the patch file. Always a parameter - nothing is auto-found.
+#                   It is committed to the repo, hand-edited as needed, and read
+#                   at build time.
+#   root            NOT a parameter and NOT recorded anywhere: the entry paths in
+#                   the patch file are relative to the filesystem root (that is how
+#                   Trivy reports them), so at build time the root is / - the only
+#                   root that exists inside the image. A local run against an
+#                   extracted tree is the single exception and must be stated
+#                   explicitly with --snapshot.
+#
+# Flags:
+#   --levels LIST   comma-separated severities to patch (default HIGH,CRIT, or
+#                   settings.levels when the file records one). Accepts CRIT/
+#                   CRITICAL, HIGH, MED/MEDIUM, LOW, UNK/UNKNOWN, ALL.
+#   --ignore LIST   comma-separated severities to skip; applied after --levels, so
+#                   `--levels ALL --ignore LOW,UNK` means everything except those.
+#                   Decision is per family group: a lockstep member inherits the
+#                   highest severity found in its family, so a group is either
+#                   taken as a whole or skipped as a whole.
+#   --snapshot DIR  resolve entry paths against an extracted tree instead of /. Only
+#                   for local verification: inside the image / is the only root that
+#                   exists, so a build run has no root to choose. The header prints
+#                   which root was used.
+#   --strict        sha1 mismatch aborts the build. Default is lenient: a mismatch
+#                   warns and continues. Strict is what a CI build should use - a
+#                   jar whose sha1 does not match Maven Central's is the wrong
+#                   artifact (mirror, truncation, classifier mix-up) and baking it
+#                   produces an image that starts and fails later. Set
+#                   settings.strict_sha1: true in the patch file to make CI strict
+#                   without changing the command line.
+#   --no-osgi-check skip the import-package check; it runs by default (see below).
+#   --no-osgi-fail  run the check but only warn on violations instead of aborting the
+#                   build. Default is to FAIL: a bump that breaks a consumer's import
+#                   range produces an image that boots and fails at runtime, so it is
+#                   caught at build time. This is a command-line escape only - nothing
+#                   in the patch file can turn it off, so a committed list always
+#                   carries the fail-by-default guarantee.
+#
+# Modes:
+#   (default)   fetch, verify sha1, osgi check, write
+#   --dry-run   print the plan only: no network, no writes
+#   --check     fetch + verify + osgi check, write nothing
+#
+# What it does:
+#   karaf lane  fetch target bundle, verify sha1, re-wrap with the vendor headers
+#               when the upstream jar is not an OSGi bundle, place it in the karaf
+#               local Maven repo layout, drop the superseded jar, extend/add the
+#               <bundle> replacement in etc/org.apache.karaf.features.xml
+#   jar lane    fetch, verify sha1, replace the file in place, recreate the symlink
+#   osgi check  every consumer Import-Package range is checked against the manifest
+#               as actually placed, over the FINAL tree (family lockstep is resolved
+#               before checking, so a group that moves together is not checked
+#               half-moved). Fails the build unless --no-osgi-fail is given.
+#   manual      printed as a pending-review list; a block runs only if it carries
+#               `accept: true`, which is how an accepted manual decision gets applied
+#
+# No external Python packages: the YAML reader covers the subset this generator emits.
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import zipfile
+import xml.etree.ElementTree as ET
+
+KARAF_SUB = 'app/pentaho/pentaho-server/pentaho-solutions/system/karaf'
+NS = 'http://karaf.apache.org/xmlns/features-processing/v1.0.0'
+MVN_CENTRAL_REPO = os.environ.get('MVN_CENTRAL_REPO', 'https://repo1.maven.org/maven2/')
+INSIDE_IMAGE = os.environ.get('INSIDE_IMAGE', 'n')
+
+SEV_RANK = {'CRITICAL': 5, 'HIGH': 4, 'MEDIUM': 3, 'LOW': 2, 'UNKNOWN': 1}
+SEV_ALIAS = {'CRIT': 'CRITICAL', 'CRITICAL': 'CRITICAL', 'HIGH': 'HIGH',
+             'MED': 'MEDIUM', 'MEDIUM': 'MEDIUM', 'LOW': 'LOW',
+             'UNK': 'UNKNOWN', 'UNKNOWN': 'UNKNOWN'}
+DEFAULT_LEVELS = 'HIGH,CRIT'
+
+
+def sev_level_set(csv):
+    out = set()
+    for part in (csv or '').split(','):
+        part = part.strip().upper()
+        if not part:
+            continue
+        if part == 'ALL':
+            out.add('ALL')
+        else:
+            out.add(SEV_ALIAS.get(part, part))
+    return out
+
+
+def entry_severity(e):
+    """Group severity: the family's highest, which is how the group is decided."""
+    return e.get('family_severity') or e.get('severity') or 'UNKNOWN'
+
+
+def redf(s):  print(s, file=sys.stderr)
+def greenf(s): print(s)
+def warn(s):  print('WARN: %s' % s, file=sys.stderr)
+def note(s):  print('NOTE: %s' % s)
+def fatal(s):
+    print('FATAL: %s' % s, file=sys.stderr)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------- YAML (subset)
+def yaml_parse(text):
+    """Reader for the patch-file subset: top-level keys (dict or list entries),
+    scalar or JSON-flow values. Enough for files written by generate-patch-lists,
+    and tolerant of hand edits (comments, unquoted flow lists)."""
+    data, section, entry = {}, None, None
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith('#'):
+            continue
+        if not raw.startswith(' '):
+            if raw.startswith('- '):           # block entry at column 0: belongs to the section
+                if data.get(section) is None:
+                    data[section] = []
+                entry = {}
+                data[section].append(entry)
+                k, v = raw[2:].split(':', 1)
+                entry[k.strip()] = value(v)
+                continue
+            key, rest = raw.split(':', 1)
+            section = key.strip()
+            data[section] = value(rest) if rest.strip() else None
+            entry = None
+            continue
+        s = raw.strip()
+        if data.get(section) is None:
+            data[section] = [] if s.startswith('- ') else {}
+        if isinstance(data[section], dict):
+            k, v = s.split(':', 1)
+            data[section][k.strip()] = value(v)
+            continue
+        if s.startswith('- '):
+            entry = {}
+            data[section].append(entry)
+            k, v = s[2:].split(':', 1)
+            entry[k.strip()] = value(v)
+        elif entry is not None:
+            k, v = s.split(':', 1)
+            entry[k.strip()] = value(v)
+    return data
+
+
+def value(v):
+    v = v.strip()
+    if v.startswith(('[', '{')):
+        try:
+            return json.loads(v)
+        except Exception:
+            inner = v[1:-1].strip()          # hand-typed flow list: [a, b] unquoted
+            return [] if not inner else [x.strip().strip('"\'') for x in inner.split(',')]
+    return scalar(v)
+
+
+def scalar(v):
+    if not isinstance(v, str):
+        return v
+    v = v.strip()
+    if v in ('true', 'false'):
+        return v == 'true'
+    if v == 'null':
+        return None
+    if len(v) >= 2 and v.startswith('"') and v.endswith('"'):
+        return json.loads(v)
+    return v
+
+
+# ---------------------------------------------------------------- OSGi helpers
+def manifest(path):
+    try:
+        raw = zipfile.ZipFile(path).read('META-INF/MANIFEST.MF').decode('utf-8', 'replace')
+    except Exception:
+        return None
+    lines = []
+    for line in raw.replace('\r\n', '\n').replace('\r', '\n').split('\n'):
+        if line.startswith(' '):
+            if lines:
+                lines[-1] += line[1:]
+        elif line:
+            lines.append(line)
+    return dict((l.split(':', 1)[0], l.split(':', 1)[1].strip()) for l in lines if ':' in l)
+
+
+def clauses(s):
+    out, cur, inb = [], '', False
+    for ch in s:
+        if ch == '[':
+            inb = True
+        elif ch == ']':
+            inb = False
+        if ch == ',' and not inb:
+            if cur.strip():
+                out.append(cur.strip())
+            cur = ''
+        else:
+            cur += ch
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
+
+def vt(s):
+    return tuple(int(x) for x in re.findall(r'\d+', s)) or (0,)
+
+
+def sat(rng, ver):
+    if not rng:
+        return True
+    m = re.match(r'^\[(.+?),(.+?)([)\]])$', rng)
+    if not m:
+        return vt(ver) >= vt(rng)
+    lo, hi, closed = vt(m.group(1)), vt(m.group(2)), m.group(3) == ']'
+    v = vt(ver)
+    return not (v < lo or v > hi or (v == hi and not closed))
+
+
+def export_versions(man):
+    ver = man.get('Bundle-Version', '0')
+    out = {}
+    for c in clauses(man.get('Export-Package') or ''):
+        pkg = c.split(';')[0]
+        x = re.search(r'version="([^"]+)"', c)
+        out[pkg] = x.group(1) if x else ver
+    return out
+
+
+# ---------------------------------------------------------------- fetching
+def artifact_url(spec, repo=MVN_CENTRAL_REPO.rstrip('/')):
+    parts = spec.split(':')
+    g, a, v = parts[0], parts[1], parts[2]
+    p = parts[3] if len(parts) > 3 else 'jar'
+    c = parts[5] if len(parts) > 5 else ''
+    return '%s/%s/%s/%s/%s-%s%s.%s' % (repo, g.replace('.', '/'), a, v, a, v,
+                                        ('-' + c) if c else '', p)
+
+
+def fetch(spec, out):
+    if shutil.which('mvn-get'):
+        subprocess.run(['mvn-get', spec, out], check=True)
+        return
+    os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
+    url = artifact_url(spec)
+    r = subprocess.run(['curl', '-sfL', '--retry', '5', '-o', out, url])
+    if r.returncode:
+        fatal('cannot fetch %s' % url)
+
+
+def fetch_sha1(spec, out):
+    url = artifact_url(spec) + '.sha1'
+    os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
+    r = subprocess.run(['curl', '-sfL', '--retry', '5', '-o', out, url])
+    return r.returncode == 0
+
+
+def verify_sha1(spec, path, strict):
+    """Default is lenient: a mismatch warns and continues. --strict makes it fatal."""
+    tmp = tempfile_path(path)
+    if not fetch_sha1(spec, tmp):
+        if not strict:
+            warn('no upstream .sha1 for %s' % spec)
+            return True
+        return False
+    expected = open(tmp).read().split()[0]
+    import hashlib
+    actual = hashlib.sha1(open(path, 'rb').read()).hexdigest()
+    if expected == actual:
+        return True
+    if not strict:
+        warn('sha1 mismatch (lenient, continuing): %s expected=%s actual=%s' % (spec, expected, actual))
+        return True
+    print('sha1 mismatch: %s expected=%s actual=%s' % (spec, expected, actual), file=sys.stderr)
+    try:
+        os.remove(path); os.remove(tmp)
+    except OSError:
+        pass
+    return False
+
+
+def tempfile_path(path):
+    d = os.environ.get('TMPDIR') or os.path.join(os.environ.get('BH_AGENT_WORKSPACE') or '/tmp', 'apply-fixes-tmp')
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, os.path.basename(path) + '.sha1')
+
+
+def rewrap(dl, template, out, version):
+    headers = manifest(template)
+    if not headers:
+        fatal('no template manifest to wrap %s' % dl)
+    with zipfile.ZipFile(dl) as zin, zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            if item.filename == 'META-INF/MANIFEST.MF':
+                continue
+            zout.writestr(item, zin.read(item.filename))
+        mf = '\r\n'.join('%s: %s' % (k, v) for k, v in headers.items() if k != 'Bundle-Version')
+        mf = 'Manifest-Version: 1.0\r\n' + mf + '\r\nBundle-Version: %s\r\n\r\n' % version
+        zout.writestr('META-INF/MANIFEST.MF', mf)
+
+
+def features_xml(path, uri, repl, mode, bsn):
+    ET.register_namespace('', NS)
+    tree = ET.parse(path)
+    root = tree.getroot()
+    brs = root.find('{%s}bundleReplacements' % NS)
+    if brs is None:
+        brs = ET.SubElement(root, '{%s}bundleReplacements' % NS)
+    coords = lambda u: tuple(u[len('mvn:'):].split('?')[0].split('/')[:2])
+    for e in brs.findall('{%s}bundle' % NS):
+        c = coords(e.get('originalUri', ''))
+        if c == coords(uri):
+            e.set('originalUri', uri)
+            e.set('replacement', repl)
+            e.set('mode', mode)
+            if bsn:
+                e.set('symbolicName', bsn)
+            print('  extended existing bundleReplacement for %s/%s' % c)
+            break
+    else:
+        attrs = {'mode': mode, 'originalUri': uri, 'replacement': repl}
+        if bsn:
+            attrs['symbolicName'] = bsn
+        ET.SubElement(brs, '{%s}bundle' % NS, attrs)
+        print('  added bundleReplacement for %s/%s' % coords(uri))
+    tree.write(path, xml_declaration=True, encoding='utf-8')
+
+
+def ensure_feature_processing(cfg_path):
+    text = open(cfg_path).read()
+    if re.search(r'^\s*featureProcessing=', text, re.M):
+        return
+    new = re.sub(r'^#\s*featureProcessing=', 'featureProcessing=', text, flags=re.M)
+    if new == text:
+        new = 'featureProcessing=org.apache.karaf.features.xml\n' + text
+    with open(cfg_path, 'w') as fh:
+        fh.write(new)
+    print('enabled featureProcessing in %s' % os.path.basename(cfg_path))
+
+
+def osgi_check(jar, karaf_system, pre_ver):
+    man = manifest(jar)
+    if not man:
+        print('  osgi check: no manifest on %s (plain jar) - nothing to check' % os.path.basename(jar))
+        return True
+    ex = export_versions(man)
+    bad, pre, opt, checked = [], [], [], 0
+    for dp, _, fs in os.walk(karaf_system):
+        for f in fs:
+            if not f.endswith('.jar'):
+                continue
+            p = os.path.join(dp, f)
+            if p == jar:
+                continue
+            m = manifest(p)
+            if not m:
+                continue
+            for c in clauses(m.get('Import-Package', '')):
+                pkg = c.split(';')[0]
+                if pkg not in ex:
+                    continue
+                checked += 1
+                x = re.search(r'version="([^"]+)"', c)
+                rng = x.group(1) if x else None
+                if sat(rng, ex[pkg]):
+                    continue
+                row = (m.get('Bundle-SymbolicName', '?'), pkg, rng, ex[pkg])
+                if ';resolution:=optional' in c:
+                    opt.append(row)
+                elif sat(rng, pre_ver):
+                    bad.append(row)
+                else:
+                    pre.append(row)
+    for b in bad:
+        print('  consumer %s imports %s %s but jar now exports %s' % b, file=sys.stderr)
+    for r in pre:
+        print('  pre-existing (not introduced by this bump): %s imports %s %s, jar exports %s' % r)
+    print('  osgi check: %d consumer imports checked against %s, %d introduced violations, %d optional, %d pre-existing'
+          % (checked, man.get('Bundle-SymbolicName', '?'), len(bad), len(opt), len(pre)))
+    return not bad
+
+
+def place(src, dst, mode):
+    """Copy the fetched jar into position. A no-op when it is already there
+    (path already at the target version), so re-running is idempotent."""
+    if os.path.abspath(src) == os.path.abspath(dst):
+        return
+    shutil.copyfile(src, dst)
+    os.chmod(dst, mode)
+
+
+# ---------------------------------------------------------------- main
+def main():
+    ap = argparse.ArgumentParser(description='Apply a committed YAML patch list during the container build.')
+    ap.add_argument('patches', help='path to the patch file (no default - must be given)')
+    ap.add_argument('--levels', default=None,
+                    help='severities to patch: comma-separated HIGH,CRIT (default; or settings.levels). '
+                         'CRIT/CRITICAL, MED/MEDIUM, LOW, UNK/UNKNOWN, ALL')
+    ap.add_argument('--snapshot', default=None,
+                    help='resolve the entry paths against an extracted tree instead of /; '
+                         'for local verification runs only - inside the image / is the only root')
+    ap.add_argument('--ignore', default=None,
+                    help='severities to skip, applied after --levels')
+    ap.add_argument('--dry-run', action='store_true', help='print the plan; no network, no writes')
+    ap.add_argument('--check', action='store_true', help='fetch + verify + osgi check, write nothing')
+    ap.add_argument('--strict', action='store_true',
+                    help='fail the build on sha1 mismatch; default is lenient (warn and continue)')
+    ap.add_argument('--no-osgi-check', dest='no_osgi_check', action='store_true',
+                    help='skip the import-package check; it runs by default')
+    ap.add_argument('--no-osgi-fail', dest='no_osgi_fail', action='store_true',
+                    help='check but only warn on violations instead of aborting the build; '
+                         'default is to fail, and this cannot be set from the patch file')
+    args = ap.parse_args()
+
+    if not os.path.exists(args.patches):
+        fatal('patch file not found: %s' % args.patches)
+    data = yaml_parse(open(args.patches).read())
+    for k, v in data.items():
+        if v is None:
+            data[k] = []            # a section with no entries
+    settings = data.get('settings') or {}
+    for k in sorted(settings):
+        if k not in ('levels', 'ignore', 'feature_processing', 'strict_sha1'):
+            warn('settings key %r is not read by this script - ignored' % k)
+
+    # Entry paths are relative to the filesystem root, exactly as Trivy reports them.
+    # The root is not recorded in the patch file: inside the image / is the only root
+    # that exists, so it is the default. --snapshot is the single exception, for a
+    # local run against an extracted tree, and must be given on the command line.
+    root = args.snapshot or '/'
+    if not os.path.isabs(root):
+        fatal('--snapshot must be an absolute path: %s' % root)
+    if args.snapshot:
+        warn('resolving against %s instead of / - local run only; the build always uses /' % root)
+    karaf_home = os.path.join(root, KARAF_SUB)
+    karaf_system = os.path.join(karaf_home, 'system')
+    if not os.path.isdir(karaf_system):
+        fatal('karaf system repo not found under %s' % root)
+
+    write = not (args.dry_run or args.check)
+    fetch_it = not args.dry_run
+    strict = args.strict or settings.get('strict_sha1')
+    run_check = not args.no_osgi_check
+    fail_on_check = run_check and not args.no_osgi_fail
+    levels = sev_level_set(args.levels or settings.get('levels') or DEFAULT_LEVELS)
+    ignore = sev_level_set(args.ignore if args.ignore is not None else settings.get('ignore'))
+
+    if settings.get('feature_processing'):
+        cfg = os.path.join(karaf_home, 'etc/org.apache.karaf.features.cfg')
+        if write:
+            ensure_feature_processing(cfg)
+        else:
+            print('plan: ensure featureProcessing=org.apache.karaf.features.xml in %s' % os.path.basename(cfg))
+
+    work = list(data.get('karaf', [])) + list(data.get('jars', []))
+    accepted = [e for e in data.get('manual', []) if e.get('accept')]
+    work += accepted
+    pending = [e for e in data.get('manual', []) if not e.get('accept')]
+
+    def selected(e):
+        sev = entry_severity(e)
+        if sev in ignore:
+            return False
+        return 'ALL' in levels or sev in levels
+
+    out_of_scope = [e for e in work if not selected(e)]
+    work = [e for e in work if selected(e)]
+
+    print('patch file : %s' % args.patches)
+    print('root        : %s%s' % (root, ' (--snapshot, local run only)' if args.snapshot else ''))
+    print('levels      : %s' % (','.join(sorted(levels)) if levels else '(none)'))
+    print('ignore      : %s' % (','.join(sorted(ignore)) if ignore else '(none)'))
+    print('osgi check  : %s' % ('on, fails the build' if fail_on_check
+                                 else 'on, warnings only (--no-osgi-fail)'
+                                if run_check else 'off (--no-osgi-check)'))
+    print('sha1        : %s' % ('strict' if strict else 'lenient (warns, continues)'))
+    print('entries     : %d (%d karaf, %d jars, %d accepted from manual)'
+          % (len(work), len(data.get('karaf', [])), len(data.get('jars', [])), len(accepted)))
+    if out_of_scope:
+        print('out of severity scope (%d, not applied):' % len(out_of_scope))
+        for e in out_of_scope:
+            print('  %s %s/%s %s -> %s %s' % (entry_severity(e), e['group'], e['artifact'],
+                                              e.get('current'), e.get('target'), e.get('reason', '')))
+    if pending:
+        print('pending manual review (%d, not applied):' % len(pending))
+        for e in pending:
+            print('  %s %s/%s %s -> %s [%s] %s' % (entry_severity(e), e['group'], e['artifact'],
+                                                    e.get('current'), e.get('target'),
+                                                    e.get('jump', '-'), e.get('reason', '')))
+
+    # ---- pass 1: place everything (so the osgi check sees the final tree) ----
+    staged = []
+    for e in work:
+        group, artifact, target, cur = e['group'], e['artifact'], e['target'], e['current']
+        # an accepted manual entry carries the lane it would be applied on; a
+        # processing block means the Karaf lane, otherwise it is a file swap
+        lane = e['lane'] if e['lane'] in ('karaf', 'jar') else \
+               ('karaf' if (e.get('processing') or {}).get('originalUri') else 'jar')
+        spec = '%s:%s:%s:jar' % (group, artifact, target)
+        classifier = (e.get('processing') or {}).get('classifier') or e.get('classifier')
+        if classifier:
+            spec += ':%s' % classifier
+        print('%s %s %s/%s %s -> %s' % (lane, entry_severity(e), group, artifact, cur, target))
+        if not e.get('fetchable', True):
+            warn('  skipped: vendor artifact, nothing to fetch from Maven Central (needs the vendor release)')
+            continue
+        gpath = group.replace('.', '/')
+        arch = os.path.join(karaf_system, gpath, artifact)
+        arch_cur = os.path.join(arch, cur, '%s-%s.jar' % (artifact, cur))
+        arch_tgt = os.path.join(arch, target, '%s-%s.jar' % (artifact, target))
+
+        if lane == 'karaf' and os.path.exists(arch_tgt):
+            note('  already seeded, skipped')
+            staged.append((e, arch_tgt, lane))
+            continue
+
+        if not fetch_it:
+            print('  plan: fetch %s%s' % (artifact_url(spec), ' (wrap if the upstream jar is not an OSGi bundle)'
+                                          if lane == 'karaf' else ''))
+            if lane == 'karaf':
+                pr = e.get('processing') or {}
+                print('  plan: %s bundleReplacement %s' % (pr.get('action') or 'add',
+                      pr.get('originalUri') or 'mvn:%s/%s/[%s,%s)' % (group, artifact, cur, target)))
+                if e.get('family_lockstep'):
+                    print('  plan: family lockstep members move with it (%d)' % len(e['family_lockstep']))
+            else:
+                for p in e.get('paths', []):
+                    print('  plan: replace %s' % p)
+            g = (e.get('osgi_check') or {})
+            if g:
+                print('  osgi check: %s%s' % (g.get('status'),
+                      ' (recorded at generation time; re-checked against the fetched manifest in --check)'
+                      if g.get('status') != 'skipped' else ''))
+            continue
+
+        out = os.path.join(os.environ.get('TMPDIR') or '/tmp', '%s-%s.jar' % (artifact, target))
+        fetch(spec, out)
+        if not verify_sha1(spec, out, strict):
+            fatal('sha1 verification failed for %s (strict)' % spec)
+        if lane != 'karaf':
+            staged.append((e, out, lane))
+            continue
+
+        if not manifest(out):
+            if not os.path.exists(arch_cur):
+                fatal('no template manifest to wrap %s' % spec)
+            wrapped = out + '.wrapped'
+            rewrap(out, arch_cur, wrapped, target)
+            out = wrapped
+            print('  wrapped: upstream jar is not an OSGi bundle; vendor headers preserved (BSN %s)'
+                  % (e.get('symbolic_name') or manifest(arch_cur).get('Bundle-SymbolicName', '?')))
+        else:
+            print('  native OSGi bundle, manifest as shipped')
+        staged.append((e, out, lane))
+
+    # ---- pass 2: write + gate against the final tree ----
+    for e, placed, lane in staged:
+        group, artifact, target, cur = e['group'], e['artifact'], e['target'], e['current']
+        if lane != 'karaf':
+            for p in e.get('paths', []):
+                full = os.path.join(root, p)
+                if not (os.path.exists(full) or os.path.islink(full)):
+                    warn('  path not present, skipped: %s' % p)
+                    continue
+                mode = oct(os.stat(full).st_mode & 0o777)
+                new = os.path.join(os.path.dirname(full), '%s-%s.jar' % (artifact, target))
+                if not write:
+                    print('  plan: replace %s' % p)
+                    continue
+                if os.path.islink(full):
+                    real = os.path.realpath(full)
+                    dst = os.path.join(os.path.dirname(real), '%s-%s.jar' % (artifact, target))
+                    if os.path.abspath(real) != os.path.abspath(dst):
+                        place(placed, dst, os.stat(real).st_mode & 0o777)
+                        os.remove(real)
+                        print('  replaced %s' % os.path.basename(real))
+                    os.symlink('%s-%s.jar' % (artifact, target), full)
+                    print('  re-pointed symlink %s' % os.path.basename(full))
+                else:
+                    place(placed, new, os.stat(full).st_mode & 0o777)
+                    if os.path.abspath(full) != os.path.abspath(new):
+                        os.remove(full)
+                        print('  replaced %s' % p)
+                    else:
+                        print('  already at target version: %s' % p)
+            continue
+
+        gpath = group.replace('.', '/')
+        arch = os.path.join(karaf_system, gpath, artifact)
+        arch_cur = os.path.join(arch, cur, '%s-%s.jar' % (artifact, cur))
+        arch_tgt = os.path.join(arch, target, '%s-%s.jar' % (artifact, target))
+        pr = e.get('processing') or {}
+        uri = pr.get('originalUri') or 'mvn:%s/%s/[%s,%s)' % (group, artifact, cur, target)
+        repl = pr.get('replacement') or 'mvn:%s/%s/%s' % (group, artifact, target)
+        mode = pr.get('mode') or 'maven'
+        bsn = pr.get('symbolicName') or e.get('symbolic_name') or ''
+        if not write:
+            print('  plan: place %s, remove %s' % (arch_tgt, arch_cur))
+            print('  plan: %s bundleReplacement %s' % (pr.get('action') or 'add', uri))
+            if run_check:
+                osgi_check(placed, karaf_system, cur)
+            else:
+                print('  osgi check skipped (--no-osgi-check): unproven')
+            continue
+        os.makedirs(os.path.join(arch, target), exist_ok=True)
+        place(placed, arch_tgt, 0o640)
+        cur_dir = arch_cur.rsplit('/', 1)[0]
+        if os.path.isdir(cur_dir) and os.path.abspath(placed) != os.path.abspath(arch_cur):
+            shutil.rmtree(cur_dir)
+            print('  removed superseded %s' % os.path.dirname(arch_cur))
+        features_xml(os.path.join(karaf_home, 'etc/org.apache.karaf.features.xml'), uri, repl, mode, bsn)
+
+    # ---- pass 3: osgi check over the final tree (every member of a group is
+    # placed before any consumer is re-checked, so a family cannot be gated half-moved) ----
+    failures = []
+    if run_check:
+        for e in work:
+            lane = e['lane'] if e['lane'] in ('karaf', 'jar') else \
+                   ('karaf' if (e.get('processing') or {}).get('originalUri') else 'jar')
+            if lane != 'karaf' or not fetch_it:
+                continue
+            placed = os.path.join(karaf_system, e['group'].replace('.', '/'), e['artifact'],
+                                  e['target'], '%s-%s.jar' % (e['artifact'], e['target']))
+            if not os.path.exists(placed):
+                continue
+            if not osgi_check(placed, karaf_system, e['current']):
+                failures.append('%s/%s' % (e['group'], e['artifact']))
+        if failures:
+            if fail_on_check:
+                fatal('osgi check failed for: %s' % ', '.join(failures))
+            warn('osgi check failed for: %s (report only)' % ', '.join(failures))
+
+    if write:
+        greenf('patch list applied')
+    else:
+        note('no writes performed (dry-run/check mode)')
+
+
+if __name__ == '__main__':
+    main()
