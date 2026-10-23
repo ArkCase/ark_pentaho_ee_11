@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 #
 # Build-time applier. Reads one committed patch file written by
-# generate-patch-lists and applies it during the container build, so the
+# get-karaf-patches and applies it during the container build, so the
 # patched bundles are baked into the image.
 #
 # SCOPE: only bundles in karaf's system repo.
 #
-#   ./apply-patch-lists <patches.yaml> [--levels HIGH,CRIT] [--ignore MED,LOW]
+#   ./apply-karaf-patches <karaf-patches.yaml> [--levels HIGH,CRIT] [--ignore MED,LOW]
 #                       [--snapshot DIR] [--dry-run] [--check]
 #                       [--no-osgi-check] [--no-osgi-fail]
 #
-#   <patches.yaml>  the patch file. Always a parameter - nothing is auto-found.
+#   <karaf-patches.yaml>  the patch file. Always a parameter - nothing is auto-found.
 #                   It is committed to the repo, hand-edited as needed, and read
 #                   at build time.
 #   root            NOT a parameter and NOT recorded anywhere: each patch names its
@@ -51,9 +51,9 @@
 #   - a patch whose patch-group is not defined under groups
 #   - two patches for the same bundle
 #   - a group whose patches move to different targets (a group moves to one version)
-#   - a group summary that does not match the group's patches (artifact at the
-#     target version, source = path of the jar being replaced, relative to the
-#     filesystem root)
+#   - a group summary that does not match the group's patches (each replacement
+#     artifact's coordinate, groupId:artifactId:version[:type[:classifier]], mapped to
+#     the paths of the jars it replaces, relative to the filesystem root)
 #   - in a group set to apply: a method other than karaf, a missing coordinate or
 #     target, a target not above current, or bundleReplacement URIs that do not
 #     move to the target
@@ -124,7 +124,9 @@ def fatal(s):
 # scalars are strings except true/false/null and whole integers, as in standard
 # YAML; plain decimals stay strings (an unquoted 1.10 is "1.10", not the float 1.1).
 # Anything else is rejected with its line number rather than guessed at.
-KEY_RE = re.compile(r'^([A-Za-z_][\w.\-]*)\s*:(?:\s+(.*))?$')
+# A key is a double-quoted string, or a plain word that may itself contain colons
+# not followed by a space (Maven coordinates such as g:a:v are keys in summaries).
+KEY_RE = re.compile(r'^("(?:[^"\\]|\\.)*"|[A-Za-z_][^\s"\'#]*?)\s*:(?:\s+(.*))?$')
 
 
 def strip_comment(line):
@@ -185,6 +187,8 @@ def _map(lines, i, ind, ctx):
         if not m:
             fatal('%s line %d: expected "key: value", got %r' % (ctx['name'], n, lines[i][1]))
         key, rest = m.group(1), (m.group(2) or '').strip()
+        if key.startswith('"'):
+            key = json.loads(key)
         if key in out:
             fatal('%s line %d: duplicate key %r' % (ctx['name'], n, key))
         i += 1
@@ -435,6 +439,15 @@ def repo_rel(home, g, a, v):
     return os.path.normpath(os.path.join(home, 'system', g.replace('.', '/'), a, v, '%s-%s.jar' % (a, v)))
 
 
+def coordinate(g, a, v, classifier=None, typ=None):
+    """Maven coordinate in mvn-get's spec order, groupId:artifactId:version[:type[:classifier]],
+    as the generator writes summary keys."""
+    out = '%s:%s:%s' % (g, a, v)
+    if classifier:
+        return '%s:%s:%s' % (out, typ or 'jar', classifier)
+    return '%s:%s' % (out, typ) if typ and typ != 'jar' else out
+
+
 def patch_label(p, i):
     return 'patch #%d (%s:%s)' % (i, p.get('groupId'), p.get('artifactId'))
 
@@ -489,7 +502,7 @@ def load_groups(data, problems):
         if not isinstance(g.get('apply'), bool):
             problems.append('group %s: apply must be true or false, not %r' % (name, g.get('apply')))
         groups[name] = {'name': name, 'apply': g.get('apply') is True, 'severity': sev_name(g.get('severity')),
-                        'note': g.get('note'), 'summary': g.get('summary') or [], 'patches': []}
+                        'note': g.get('note'), 'summary': g.get('summary') or {}, 'patches': []}
 
     seen = {}
     for i, p in enumerate(data.get('patches') or [], 1):
@@ -517,14 +530,20 @@ def load_groups(data, problems):
         if len(targets) > 1:
             problems.append('group %s: patches move to different targets (%s); a group moves to one version'
                             % (name, ', '.join(targets)))
-        want = sorted(('%s:%s:%s' % (p.get('groupId'), p.get('artifactId'), p.get('target')),
-                       repo_rel(str(p.get('karaf') or ''), p.get('groupId') or '', p.get('artifactId') or '',
-                                p.get('current') or ''))
-                      for p in ps)
-        have = sorted((str(x.get('artifact')), str(x.get('source'))) for x in g['summary'] if isinstance(x, dict))
-        if want != have or len(have) != len(g['summary']):
+        want = {}
+        for p in ps:
+            c = coordinate(p.get('groupId'), p.get('artifactId'), p.get('target'),
+                           (p.get('processing') or {}).get('classifier'))
+            want.setdefault(c, []).append(repo_rel(str(p.get('karaf') or ''), p.get('groupId') or '',
+                                                   p.get('artifactId') or '', p.get('current') or ''))
+        want = {c: sorted(v) for c, v in want.items()}
+        have = g['summary']
+        have = ({str(c): sorted(str(x) for x in (v if isinstance(v, list) else [v])) for c, v in have.items()}
+                if isinstance(have, dict) else None)
+        if want != have:
             problems.append('group %s: summary does not match its patches; it should read:\n%s'
-                            % (name, '\n'.join('      - artifact: %s\n        source: %s' % w for w in want)))
+                            % (name, '\n'.join('      %s:\n%s' % (c, '\n'.join('        - %s' % x for x in v))
+                                                for c, v in sorted(want.items()))))
         if g['apply']:
             for i, p in g['patches']:
                 problems.extend(patch_problems(p, '%s in group %s' % (patch_label(p, i), name)))
@@ -559,7 +578,7 @@ def main():
     data = yaml_parse(open(args.patches).read(), args.patches)
     old = [k for k in ('families', 'karaf', 'jars', 'manual') if k in data]
     if old:
-        fatal('%s uses an old layout (%s); regenerate it with generate-patch-lists'
+        fatal('%s uses an old layout (%s); regenerate it with get-karaf-patches'
               % (args.patches, ', '.join(old)))
     settings = data.get('settings') or {}         # keys this script does not read are ignored
 

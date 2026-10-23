@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # Consumes a Trivy JSON report and writes ONE YAML patch file that
-# apply-patch-lists consumes during the container build.
+# apply-karaf-patches consumes during the container build.
 #
 # SCOPE: only bundles in karaf system repos. Everything outside karaf (lib dirs,
 # webapps, plugin folders) is ignored entirely and handled by other means.
@@ -10,7 +10,7 @@
 # the bundles that belong together and the version they move to are all worked out
 # from the report and the analysed tree.
 #
-#   ./generate-patch-lists <vulnerabilities.json> <root> [--out patches.yaml]
+#   ./get-karaf-patches <vulnerabilities.json> <root> [--out karaf-patches.yaml]
 #                          [--levels HIGH,CRIT] [--no-osgi-check] [--no-osgi-fail]
 #
 #   <vulnerabilities.json>  the Trivy report. Produced by scan.sh, or assembled
@@ -19,7 +19,7 @@
 #   <root>                  path to the container filesystem that is analysed
 #                           (karaf instances, manifests, feature pins). It is NOT
 #                           recorded: paths in the output are relative to it.
-#   --levels LIST         severity levels recorded for apply-patch-lists (default
+#   --levels LIST         severity levels recorded for apply-karaf-patches (default
 #                           HIGH,CRIT). CRIT/CRITICAL, HIGH, MED/MEDIUM, LOW,
 #                           UNK/UNKNOWN, ALL.
 #   --no-osgi-fail        report OSGi violations as warnings instead of exiting 1.
@@ -37,10 +37,11 @@
 #   header:    provenance: sha256 of the source report and the scanned image
 #   groups:    one entry per unit of work, named for what it moves. `apply` is the
 #              only switch and is all-or-nothing; `severity` is the highest severity
-#              the group addresses and is what --levels filters on; `summary` lists
-#              each bundle it moves (artifact = coordinates at the target version,
-#              source = path of the jar it replaces, relative to the filesystem
-#              root) for review at a glance; `note` says why a group is disabled by
+#              the group addresses and is what --levels filters on; `summary` maps
+#              each replacement artifact (Maven coordinate in mvn-get's order,
+#              groupId:artifactId:version[:type[:classifier]]) to the paths of the jars
+#              it replaces, relative to the filesystem root - informative, for review
+#              at a glance (it repeats what the patches say); `note` says why a group is disabled by
 #              default, and names related repackaged copies that cannot move with it.
 #   patches:   what to do, one entry per bundle and karaf instance: `patch-group`
 #              names its group, `method` says how it is applied (karaf: seed the
@@ -61,10 +62,12 @@
 #     MIN_SHARED_SEGMENTS leading segments (a.b.c.x and a.b.c.y); sharing only an
 #     organisation prefix (org.apache) does not count.
 #   - a release is found by linking bundles that (a) have the same version and
-#     related groupIds - released together - or (b) are copies of the same
+#     related groupIds - released together - (b) are copies of the same
 #     groupId:artifactId on the same major - a bundle patched in one place is
-#     patched everywhere. Links are followed transitively. Artifact names play no
-#     part. Stated limit: two unrelated projects under one deep prefix that happen to
+#     patched everywhere - or (c) are in a family: a release spanning two or more
+#     related groupIds marks those groupIds as one family, and every bundle in one
+#     of them on the same major moves in lockstep. Links are followed transitively.
+#     Artifact names play no part. Stated limit: two unrelated projects under one deep prefix that happen to
 #     share a version string are linked.
 #   - target, per release: its vulnerable members are taken by installed
 #     major.minor. When every CVE of such a line has a fix on that major.minor, the
@@ -87,80 +90,20 @@
 
 import argparse
 import hashlib
-import json
 import os
 import re
 import sys
 import zipfile
 from collections import defaultdict
 
-
-# Severity names as Trivy spells them, plus the short forms the user asked for.
-SEV_RANK = {'CRITICAL': 5, 'HIGH': 4, 'MEDIUM': 3, 'LOW': 2, 'UNKNOWN': 1}
-SEV_ALIAS = {'CRIT': 'CRITICAL', 'CRITICAL': 'CRITICAL', 'HIGH': 'HIGH',
-             'MED': 'MEDIUM', 'MEDIUM': 'MEDIUM', 'LOW': 'LOW',
-             'UNK': 'UNKNOWN', 'UNKNOWN': 'UNKNOWN'}
-DEFAULT_LEVELS = 'HIGH,CRIT'            # what the applier patches unless told otherwise
-JUMP_RANK = {'patch': 1, 'minor': 2, 'major': 3}
-
-
-def sev_name(s):
-    return SEV_ALIAS.get((s or '').strip().upper(), 'UNKNOWN')
-
-
-def max_sev(names):
-    names = [n for n in names if n]
-    return max(names, key=lambda s: SEV_RANK.get(s, 0)) if names else None
-
-# Two groupIds belong to one project when they are equal or share at least this
-# many leading segments (com.fasterxml.jackson.core / com.fasterxml.jackson.jaxrs).
-# Two segments is only an organisation (org.apache, org.springframework), which
-# hosts many independently released projects, so it does not count.
-MIN_SHARED_SEGMENTS = 3
-
-
-def related(g1, g2):
-    if g1 == g2:
-        return True
-    n = 0
-    for x, y in zip(g1.split('.'), g2.split('.')):
-        if x != y:
-            break
-        n += 1
-    return n >= MIN_SHARED_SEGMENTS
+sys.dont_write_bytecode = True     # no __pycache__ next to the scripts
+from patchgen import (DEFAULT_LEVELS, SEV_RANK, base_notes, coordinate, gav, plan, read_report,  # noqa: E402
+                      add_vuln, stuck_copies, tidy, vstr, vtuple, yaml_dump)
 
 
 def layout(g, a, v):
     """Where a bundle sits in a karaf system repo (Maven layout), relative to the karaf home."""
     return 'system/%s/%s/%s/%s-%s.jar' % (g.replace('.', '/'), a, v, a, v)
-
-
-def common_group(groups):
-    """Longest dotted groupId prefix shared by all the given groupIds."""
-    parts = [g.split('.') for g in groups]
-    out = []
-    for segs in zip(*parts):
-        if len(set(segs)) != 1:
-            break
-        out.append(segs[0])
-    return '.'.join(out) or '(mixed)'
-
-
-def vtuple(s):
-    return tuple(int(p) for p in re.findall(r'\d+', s)) or (0,)
-
-
-def vstr(t):
-    return '.'.join(str(x) for x in t)
-
-
-def jump_kind(cur, tgt):
-    a, b = vtuple(cur), vtuple(tgt)
-    if a[0] != b[0]:
-        return 'major'
-    if len(a) < 2 or len(b) < 2 or a[1] != b[1]:
-        return 'minor'
-    return 'patch'
 
 
 def manifest(jar_path):
@@ -236,62 +179,8 @@ def imports_of(man):
     return out
 
 
-# ---------------------------------------------------------------- YAML output
-# A plain scalar is written unquoted unless YAML would read it as something else
-# (a number, bool, null) or its characters need quoting. Versions are always quoted
-# so that 1.10 stays "1.10" for any YAML reader, not the float 1.1.
-UNSAFE_PLAIN = re.compile(r'^[\s\-?:,\[\]{}#&*!|>\'"%@`]|: | #|\s$|^$')
-NOT_A_STRING = re.compile(r'^(~|null|Null|NULL|true|True|TRUE|false|False|FALSE|y|Y|yes|Yes|YES|'
-                          r'n|N|no|No|NO|on|On|ON|off|Off|OFF|'
-                          r'[-+]?(\.[0-9]+|[0-9][0-9_]*(\.[0-9_]*)?)([eE][-+]?[0-9]+)?|'
-                          r'0x[0-9a-fA-F]+|0o[0-7]+|[-+]?\.(inf|Inf|INF)|\.(nan|NaN|NAN))$')
-VERSION_KEYS = ('current', 'target', 'candidates')
-
-
-def scalar(v, quote=False):
-    if v is None:
-        return 'null'
-    if isinstance(v, bool):
-        return 'true' if v else 'false'
-    if isinstance(v, (int, float)):
-        return str(v)
-    if isinstance(v, list):
-        return '[]'                          # only empty containers get here
-    if isinstance(v, dict):
-        return '{}'
-    s = str(v)
-    if quote or '\n' in s or UNSAFE_PLAIN.search(s) or NOT_A_STRING.match(s):
-        return json.dumps(s)                 # a JSON string is a valid YAML double-quoted scalar
-    return s
-
-
-def dump_node(v, ind, quote=False):
-    pad = ' ' * ind
-    out = []
-    if isinstance(v, dict):
-        for k, x in v.items():
-            q = k in VERSION_KEYS
-            if isinstance(x, (dict, list)) and x:
-                out.append('%s%s:' % (pad, k))
-                out += dump_node(x, ind + 2, q)
-            else:
-                out.append('%s%s: %s' % (pad, k, scalar(x, q)))
-    else:
-        for x in v:
-            if isinstance(x, dict) and x:
-                sub = dump_node(x, ind + 2, quote)
-                sub[0] = pad + '- ' + sub[0].lstrip()
-                out += sub
-            elif isinstance(x, list) and x:
-                out.append(pad + '-')
-                out += dump_node(x, ind + 2, quote)
-            else:
-                out.append('%s- %s' % (pad, scalar(x, quote)))
-    return out
-
-
 TOP_COMMENT = """\
-Karaf patch list for apply-patch-lists. Generated by generate-patch-lists; commit
+Karaf patch list for apply-karaf-patches. Generated by get-karaf-patches; commit
 it, review it, edit it by hand. Only bundles in karaf's system repo are covered.
 
 groups    one entry per unit of work. `apply` is the only switch, all-or-nothing:
@@ -302,32 +191,11 @@ patches   one entry per bundle. Moving a bundle to another group is a matter of
           target, so its patches must all share it."""
 
 
-def yaml_dump(doc):
-    out = ['# ' + l if l else '#' for l in TOP_COMMENT.split('\n')]
-    for key, val in doc.items():
-        out.append('')
-        if isinstance(val, list) and val:
-            out.append('%s:' % key)
-            for i, item in enumerate(val):
-                if i:
-                    out.append('')           # one blank line between blocks
-                out += dump_node([item], 2)
-        elif isinstance(val, dict) and val and key == 'groups':
-            out.append('%s:' % key)
-            for i, (k, x) in enumerate(val.items()):
-                if i:
-                    out.append('')
-                out += dump_node({k: x}, 2)
-        else:
-            out += dump_node({key: val}, 0)
-    return '\n'.join(out) + '\n'
-
-
 def main():
     ap = argparse.ArgumentParser(description='Turn a Trivy JSON scan into a committed YAML patch list for karaf.')
     ap.add_argument('input', help='path to the Trivy JSON report (no default - must be given)')
     ap.add_argument('root', help='path of the container filesystem that is analysed; not recorded in the output file')
-    ap.add_argument('--out', default='patches.yaml', help='output patch file')
+    ap.add_argument('--out', default='karaf-patches.yaml', help='output patch file')
     ap.add_argument('--levels', default=DEFAULT_LEVELS,
                     help='severity levels the applier should patch (recorded in settings.levels; '
                          'HIGH/CRIT or CRITICAL, MED or MEDIUM, LOW, UNK or UNKNOWN, ALL)')
@@ -338,15 +206,8 @@ def main():
                          'so the applier still fails by default')
     args = ap.parse_args()
 
-    report = json.load(open(args.input))
-    results = report.get('Results') or report.get('results') or []
+    report, entries = read_report(args.input)
     root = os.path.normpath(args.root)
-
-    def gav(k):
-        return '%s:%s:%s' % k
-
-    def tidy(e):
-        return {k: v for k, v in e.items() if v not in (None, [], '')}
 
     # ---- karaf instances are discovered, not configured: a report path is a karaf
     #      bundle when it sits at <home>/system/<Maven layout of its own coordinates>
@@ -368,21 +229,8 @@ def main():
             return None
         return home if is_karaf(home) else None
 
-    purl_re = re.compile(r'pkg:maven/([^/]+)/([^@]+)@([^?#]+)')
-    entries = []                   # (key, path, vulnerability or None)
-    for res in results:
-        for v in (res.get('Vulnerabilities') or res.get('vulnerabilities') or []):
-            m = purl_re.match((v.get('PkgIdentifier') or {}).get('PURL') or v.get('Purl') or '')
-            if m:
-                entries.append(((m.group(1), m.group(2), v.get('InstalledVersion') or m.group(3)),
-                                v.get('PkgPath') or v.get('FilePath') or '', v))
-        for pk in (res.get('Packages') or []):
-            m = purl_re.match((pk.get('Identifier') or {}).get('PURL') or '')
-            if m and pk.get('FilePath'):
-                entries.append(((m.group(1), m.group(2), pk.get('Version') or m.group(3)), pk['FilePath'], None))
-
     homes_of = defaultdict(set)    # (g, a, v) -> karaf homes holding it at its Maven location
-    for k, path, _ in entries:
+    for k, path, _, _ in entries:
         home = karaf_home_of(path, k)
         if home:
             homes_of[k].add(home)
@@ -395,7 +243,7 @@ def main():
     vulns = {}                     # (g, a, v) -> {'cves': {id: {'fixes', 'severity'}}}
     elsewhere = defaultdict(set)   # (g, a, v) -> paths inside a karaf repo that are NOT its Maven location
     unpatchable = set()
-    for k, path, v in entries:
+    for k, path, v, _ in entries:
         at_home = karaf_home_of(path, k)
         if not at_home:
             if in_a_karaf_repo(path):
@@ -405,15 +253,8 @@ def main():
                 else:
                     elsewhere[k].add(path)
             continue                    # outside karaf: out of scope
-        if v is None:
-            continue
-        c = vulns.setdefault(k, {'cves': {}})['cves'].setdefault(
-            v.get('VulnerabilityID'), {'fixes': set(), 'severity': 'UNKNOWN'})
-        c['fixes'].update(x.strip() for x in (v.get('FixedVersion') or '').split(',') if x.strip())
-        c['severity'] = max_sev([c['severity'], sev_name(v.get('Severity'))])
-
-    def sev_of(k):
-        return max_sev(c['severity'] for c in vulns[k]['cves'].values())
+        if v is not None:
+            add_vuln(vulns, k, v)
 
     # ---- per karaf home: OSGi consumers, feature pins, existing processing file ----
     consumers, feature_text, processing_text = defaultdict(list), {}, {}
@@ -483,185 +324,35 @@ def main():
                     viol.append('%s imports %s %s; exported %s before, %s after' % (cb, pkg, rng, before, after))
         return {'status': 'fail' if viol else 'pass', 'checked': checked, 'violations': viol}
 
-    # ---- releases: bundles that belong together, found from the data alone ----
-    #   - same version and related groupIds (equal, or MIN_SHARED_SEGMENTS shared):
-    #     released together, e.g. every artifact of one project release
-    #   - same groupId:artifactId on the same major: another copy of the same artifact,
-    #     which must move with it ("patched in one place, patched everywhere")
-    nodes = sorted(homes_of)
-    parent = {k: k for k in nodes}
-
-    def find(k):
-        while parent[k] != k:
-            parent[k] = parent[parent[k]]
-            k = parent[k]
-        return k
-
-    def union(x, y):
-        rx, ry = find(x), find(y)
-        if rx != ry:
-            parent[max(rx, ry)] = min(rx, ry)
-
-    by_version, by_artifact = defaultdict(list), defaultdict(list)
-    for k in nodes:
-        by_version[k[2]].append(k)
-        by_artifact[(k[0], k[1], vtuple(k[2])[0])].append(k)
-    for ks in by_version.values():
-        for i, x in enumerate(ks):
-            for y in ks[i + 1:]:
-                if related(x[0], y[0]):
-                    union(x, y)
-    for ks in by_artifact.values():
-        for y in ks[1:]:
-            union(ks[0], y)
-    releases = defaultdict(list)
-    for k in nodes:
-        releases[find(k)].append(k)
-
-    def pick_target(line_mm, cve_fix_sets):
-        """The major.minor to land on is the installed one when every CVE has a fix
-        there (patch move); otherwise the lowest same-major minor at which every CVE
-        is fixed (minor move). Within that major.minor the LATEST fix offered for any
-        member is taken. None: some CVE has no fix on this major."""
-        need = []
-        for fs in cve_fix_sets:
-            same = sorted((f for f in fs if vtuple(f)[0] == line_mm[0] and vtuple(f)[:2] >= line_mm), key=vtuple)
-            if not same:
-                return None
-            need.append(same[0])
-        mm = max(vtuple(f)[:2] for f in need)
-        return max((f for fs in cve_fix_sets for f in fs if vtuple(f)[:2] == mm), key=vtuple)
-
-    def pick_any(line_mm, cve_fix_sets):
-        """pick_target on the installed major, else on the lowest higher major where
-        every CVE is fixed (a major move)."""
-        t = pick_target(line_mm, cve_fix_sets)
-        if t:
-            return t
-        for major in sorted({vtuple(f)[0] for fs in cve_fix_sets for f in fs if vtuple(f)[0] > line_mm[0]}):
-            t = pick_target((major, 0), cve_fix_sets)
-            if t:
-                return t
-        return None
-
-    # ---- one target per release: every CVE of every vulnerable member is fixed ----
-    already, units = [], []        # units: {'target', 'members': [(g, a, v)]}
-    for _, ks in sorted(releases.items()):
-        vuln = [k for k in ks if k in vulns]
-        if not vuln:
-            continue
-        lines_ = defaultdict(list)
-        for k in vuln:
-            if any(c['fixes'] for c in vulns[k]['cves'].values()):
-                lines_[vtuple(k[2])[:2]].append(k)
-            else:
-                unpatchable.add('%s - no fixed version reported' % gav(k))
-        targets = []
-        for mm, arts in sorted(lines_.items()):
-            t = pick_any(mm, [c['fixes'] for k in arts for c in vulns[k]['cves'].values() if c['fixes']])
-            if t:
-                targets.append(t)
-            else:
-                for k in arts:
-                    unpatchable.add('%s - no single major line fixes every CVE' % gav(k))
-        if not targets:
-            continue
-        target = max(targets, key=vtuple)
-        members = []
-        for k in ks:
-            if vtuple(k[2]) < vtuple(target):
-                members.append(k)
-            elif k in vulns:
-                already.append((k, target))
-        if any(k in vulns for k in members):
-            units.append({'target': target, 'members': members})
-
-    # ---- releases of related groupIds that land on the same target are one group ----
-    up = list(range(len(units)))
-
-    def ufind(i):
-        while up[i] != i:
-            up[i] = up[up[i]]
-            i = up[i]
-        return i
-    for i, x in enumerate(units):
-        for j in range(i + 1, len(units)):
-            y = units[j]
-            if x['target'] == y['target'] and any(related(a[0], b[0]) for a in x['members'] for b in y['members']):
-                up[max(ufind(i), ufind(j))] = min(ufind(i), ufind(j))
-    merged = defaultdict(list)
-    for i, u in enumerate(units):
-        merged[ufind(i)].extend(u['members'])
-    units = [{'target': units[i]['target'], 'members': sorted(set(ms))} for i, ms in sorted(merged.items())]
-
-    # ---- split off members with no CVE whose jump is larger than the vulnerable ones' ----
-    final = []                     # {'target', 'members', 'parent', 'mm'}
-    for u in units:
-        vj = max((jump_kind(k[2], u['target']) for k in u['members'] if k in vulns), key=JUMP_RANK.get)
-        keep, split = [], defaultdict(list)
-        for k in u['members']:
-            if k not in vulns and JUMP_RANK[jump_kind(k[2], u['target'])] > JUMP_RANK[vj]:
-                split[vtuple(k[2])[:2]].append(k)
-            else:
-                keep.append(k)
-        main_i = len(final)
-        final.append(dict(u, members=keep, parent=None, mm=None))
-        for mm, ms in sorted(split.items()):
-            final.append(dict(u, members=ms, parent=main_i, mm=mm))
-
-    # ---- names: the members' shared groupId (last segment), or the artifactId ----
-    names, used = [], set()
-    for u in final:
-        if u['mm'] is not None:
-            base = '%s-%s' % (names[u['parent']], '.'.join(str(x) for x in u['mm']))
-        else:
-            arts = sorted({k[1] for k in u['members']})
-            cg = common_group(k[0] for k in u['members'])
-            base = arts[0] if len(arts) == 1 or cg == '(mixed)' else cg.split('.')[-1]
-        name = base if base not in used else '%s-%s' % (base, u['target'])
-        used.add(name)
-        names.append(name)
+    plan_groups, already = plan(homes_of, vulns, unpatchable)
 
     # ---- build groups and patches ----
     group_rows = []                # (sort key, name, group, patches, chk, gjump, split parent)
-    for i, u in enumerate(final):
-        name, target, keys = names[i], u['target'], u['members']
-        gjump = max((jump_kind(k[2], target) for k in keys), key=JUMP_RANK.get)
-        par = final[u['parent']] if u['mm'] is not None else None
-        sev = max_sev(sev_of(k) for k in (par['members'] if par else keys) if k in vulns)
-        patches, moving, summary = [], [], []
+    for pg in plan_groups:
+        name, target, keys, sev = pg['name'], pg['target'], pg['members'], pg['severity']
+        patches, moving, summary = [], [], defaultdict(list)
         for k in keys:
             g, a, v = k
             for h in sorted(homes_of[k]):
                 jar_rel = os.path.normpath(os.path.join(h, layout(*k)))
                 bsn, wrapped = bundle_info(os.path.join(root, jar_rel), g, a)
                 moving.append((h, os.path.join(root, jar_rel), wrapped))
+                pr = processing_block(h, g, a, target)
                 patches.append(tidy({'patch-group': name, 'method': 'karaf', 'karaf': h, 'groupId': g,
                                      'artifactId': a, 'current': v, 'target': target,
-                                     'symbolic_name': bsn or None, 'processing': processing_block(h, g, a, target)}))
-                summary.append({'artifact': '%s:%s:%s' % (g, a, target), 'source': jar_rel})
+                                     'symbolic_name': bsn or None, 'processing': pr}))
+                summary[coordinate(g, a, target, pr.get('classifier'))].append(jar_rel)
         chk = osgi_predict(moving, target)
-        notes = []
-        if par:
-            notes.append('members of %s with no CVE of their own, on an older line' % names[u['parent']])
-        if gjump != 'patch':
-            olds = sorted({k[2] for k in keys}, key=vtuple)
-            notes.append('%s version jump (%s -> %s)' % (gjump, ', '.join(olds), target))
+        notes = base_notes(pg)
         if chk['status'] == 'fail':
             notes.append('import-range violation introduced by the move')
         # related bundles inside a karaf repo but not at their Maven location (repackaged
         # or renamed): they cannot be swapped and stay on their version
-        vers, gas = {k[2] for k in keys}, {k[:2] for k in keys}
-        stuck = sorted(os.path.basename(x) for k, ps in elsewhere.items()
-                       if (k[2] in vers and any(related(k[0], m[0]) for m in keys)) or k[:2] in gas for x in ps)
-        if stuck:
-            notes_left = 'repackaged copies cannot be swapped and stay on their version: %s' % ', '.join(stuck)
-        else:
-            notes_left = None
-        group = tidy({'apply': not notes, 'severity': sev,
-                      'note': '; '.join(notes + ([notes_left] if notes_left else [])) or None,
-                      'summary': summary})
-        group_rows.append(((-SEV_RANK.get(sev, 0), name), name, group, patches, chk, gjump, par))
+        stuck = stuck_copies(pg, elsewhere)
+        left = ['repackaged copies cannot be swapped and stay on their version: %s' % ', '.join(stuck)] if stuck else []
+        group = tidy({'apply': not notes, 'severity': sev, 'note': '; '.join(notes + left) or None,
+                      'summary': {c: sorted(ps) for c, ps in sorted(summary.items())}})
+        group_rows.append(((-SEV_RANK.get(sev, 0), name), name, group, patches, chk, pg['gjump'], pg['split_of']))
 
     group_rows.sort(key=lambda r: r[0])
     groups = {r[1]: r[2] for r in group_rows}
@@ -671,7 +362,7 @@ def main():
               'scan_artifact': report.get('ArtifactName')}
     settings = {'levels': args.levels}           # severity levels the applier patches
     open(args.out, 'w').write(yaml_dump({'settings': settings, 'header': header, 'groups': groups,
-                                         'patches': patches}))
+                                         'patches': patches}, TOP_COMMENT))
 
     on = [r for r in group_rows if r[2]['apply']]
     print('karaf       : %s' % (', '.join(homes) if homes else 'no karaf instance found in the report and tree'))
