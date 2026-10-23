@@ -2,21 +2,22 @@
 #
 # Build-time applier. Reads one committed patch file written by
 # generate-patch-lists and applies it during the container build, so the
-# patched artifacts are baked into the image.
+# patched bundles are baked into the image.
+#
+# SCOPE: only bundles in karaf's system repo.
 #
 #   ./apply-patch-lists <patches.yaml> [--levels HIGH,CRIT] [--ignore MED,LOW]
-#                       [--snapshot DIR] [--dry-run] [--check] [--strict]
+#                       [--snapshot DIR] [--dry-run] [--check]
 #                       [--no-osgi-check] [--no-osgi-fail]
 #
 #   <patches.yaml>  the patch file. Always a parameter - nothing is auto-found.
 #                   It is committed to the repo, hand-edited as needed, and read
 #                   at build time.
-#   root            NOT a parameter and NOT recorded anywhere: the entry paths in
-#                   the patch file are relative to the filesystem root (that is how
-#                   Trivy reports them), so at build time the root is / - the only
-#                   root that exists inside the image. A local run against an
-#                   extracted tree is the single exception and must be stated
-#                   explicitly with --snapshot.
+#   root            NOT a parameter and NOT recorded anywhere: bundle locations
+#                   follow from their coordinates under the karaf system repo, and
+#                   at build time the root is / - the only root that exists inside
+#                   the image. A local run against an extracted tree is the single
+#                   exception and must be stated explicitly with --snapshot.
 #
 # Flags:
 #   --levels LIST   comma-separated severities to patch (default HIGH,CRIT, or
@@ -24,19 +25,12 @@
 #                   CRITICAL, HIGH, MED/MEDIUM, LOW, UNK/UNKNOWN, ALL.
 #   --ignore LIST   comma-separated severities to skip; applied after --levels, so
 #                   `--levels ALL --ignore LOW,UNK` means everything except those.
-#                   A family is filtered on its own severity (the highest among its
-#                   members), so it is taken as a whole or skipped as a whole.
-#   --snapshot DIR  resolve entry paths against an extracted tree instead of /. Only
-#                   for local verification: inside the image / is the only root that
-#                   exists, so a build run has no root to choose. The header prints
-#                   which root was used.
-#   --strict        sha1 mismatch aborts the build. Default is lenient: a mismatch
-#                   warns and continues. Strict is what a CI build should use - a
-#                   jar whose sha1 does not match Maven Central's is the wrong
-#                   artifact (mirror, truncation, classifier mix-up) and baking it
-#                   produces an image that starts and fails later. Set
-#                   settings.strict_sha1: true in the patch file to make CI strict
-#                   without changing the command line.
+#                   A group is filtered on its own severity, so it is taken as a
+#                   whole or skipped as a whole.
+#   --snapshot DIR  resolve against an extracted tree instead of /. Only for local
+#                   verification: inside the image / is the only root that exists,
+#                   so a build run has no root to choose. The header prints which
+#                   root was used.
 #   --no-osgi-check skip the import-package check; it runs by default (see below).
 #   --no-osgi-fail  run the check but only warn on violations instead of aborting the
 #                   build. Default is to FAIL: a bump that breaks a consumer's import
@@ -46,33 +40,39 @@
 #                   carries the fail-by-default guarantee.
 #
 # Modes:
-#   (default)   fetch, verify sha1, osgi check, write
+#   (default)   fetch, osgi check, write
 #   --dry-run   print the plan only: no network, no writes
-#   --check     fetch + verify + osgi check, write nothing
+#   --check     fetch + osgi check, write nothing
 #
-# What is applied: every entry under `families` is a family - members that move to
-# one target together; a standalone fix is a family of one. The family's `lane`
-# decides, and nothing else: auto applies every member, manual applies none.
-#   The whole file is validated before anything runs: a family set to auto that
-#   cannot work (karaf mechanism on a plain jar, jar swap of a fat jar, no target, a
-#   target that disagrees with its bundleReplacement URIs...) aborts the build.
+# What is applied: every group whose `apply` is true (and whose severity is in
+# scope) has ALL its patches applied; a group set to false has none applied.
+# The whole file is validated before anything runs, and any of these aborts:
+#   - a patch whose patch-group is not defined under groups
+#   - two patches for the same bundle
+#   - a group whose patches move to different targets (a group moves to one version)
+#   - a group summary that does not match the group's patches (artifact at the
+#     target version, source = path of the jar being replaced, relative to the
+#     filesystem root)
+#   - in a group set to apply: a method other than karaf, a missing coordinate or
+#     target, a target not above current, or bundleReplacement URIs that do not
+#     move to the target
+# A group with no patches only warns.
 #
-# What each member `mechanism` does:
-#   karaf       fetch target bundle, verify sha1, re-wrap with the vendor headers
-#               when the upstream jar is not an OSGi bundle, place it in the karaf
-#               local Maven repo layout, drop the superseded jar, extend/add the
-#               <bundle> replacement in etc/org.apache.karaf.features.xml
-#   jar         fetch, verify sha1, replace the file in place, recreate the symlink
+# What method `karaf` does: fetch the target bundle with mvn-get, re-wrap it with
+# the vendor headers when the upstream jar is not an OSGi bundle, place it in the
+# karaf system repo at its Maven location, drop the superseded version, and
+# extend/add the <bundle> replacement in etc/org.apache.karaf.features.xml.
+# featureProcessing is always switched on in etc/org.apache.karaf.features.cfg when
+# anything is applied: without it karaf ignores the bundleReplacements.
 #   osgi check  every consumer Import-Package range is checked against the manifest
-#               as actually placed, over the FINAL tree (every member of a family
-#               is placed before any consumer is checked, so a family is never
-#               checked half-moved). Fails the build unless --no-osgi-fail is given.
+#               as actually placed, over the FINAL tree (every patch of a group is
+#               placed before any consumer is checked, so a group is never checked
+#               half-moved). Fails the build unless --no-osgi-fail is given.
 #
 # No external Python packages: the YAML reader covers the block-style subset the
 # generator writes, plus the usual hand edits (comments, quoting, flow lists).
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -85,15 +85,13 @@ import xml.etree.ElementTree as ET
 KARAF_SUB = 'app/pentaho/pentaho-server/pentaho-solutions/system/karaf'
 KARAF_REPO = '/system/karaf/system/'
 NS = 'http://karaf.apache.org/xmlns/features-processing/v1.0.0'
-MVN_CENTRAL_REPO = os.environ.get('MVN_CENTRAL_REPO', 'https://repo1.maven.org/maven2/')
 
 SEV_RANK = {'CRITICAL': 5, 'HIGH': 4, 'MEDIUM': 3, 'LOW': 2, 'UNKNOWN': 1}
 SEV_ALIAS = {'CRIT': 'CRITICAL', 'CRITICAL': 'CRITICAL', 'HIGH': 'HIGH',
              'MED': 'MEDIUM', 'MEDIUM': 'MEDIUM', 'LOW': 'LOW',
              'UNK': 'UNKNOWN', 'UNKNOWN': 'UNKNOWN'}
 DEFAULT_LEVELS = 'HIGH,CRIT'
-SETTINGS_KEYS = ('levels', 'ignore', 'feature_processing', 'strict_sha1')
-TOP_KEYS = ('settings', 'header', 'families')
+METHODS = ('karaf',)
 
 
 def sev_name(s):
@@ -315,60 +313,12 @@ def export_versions(man):
 
 
 # ---------------------------------------------------------------- fetching
-def artifact_url(spec, repo=MVN_CENTRAL_REPO.rstrip('/')):
-    parts = spec.split(':')
-    g, a, v = parts[0], parts[1], parts[2]
-    p = parts[3] if len(parts) > 3 else 'jar'
-    c = parts[5] if len(parts) > 5 else ''
-    return '%s/%s/%s/%s/%s-%s%s.%s' % (repo, g.replace('.', '/'), a, v, a, v,
-                                        ('-' + c) if c else '', p)
-
-
 def fetch(spec, out):
-    if shutil.which('mvn-get'):
-        subprocess.run(['mvn-get', spec, out], check=True)
-        return
-    os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
-    url = artifact_url(spec)
-    r = subprocess.run(['curl', '-sfL', '--retry', '5', '-o', out, url])
+    """Download with mvn-get (from the base image): it resolves the repository
+    (MVN_CENTRAL_REPO), credentials and retries, and verifies the download."""
+    r = subprocess.run(['mvn-get', spec, out])
     if r.returncode:
-        fatal('cannot fetch %s' % url)
-
-
-def fetch_sha1(spec, out):
-    url = artifact_url(spec) + '.sha1'
-    os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
-    r = subprocess.run(['curl', '-sfL', '--retry', '5', '-o', out, url])
-    return r.returncode == 0
-
-
-def verify_sha1(spec, path, strict):
-    """Default is lenient: a mismatch warns and continues. --strict makes it fatal."""
-    tmp = tempfile_path(path)
-    if not fetch_sha1(spec, tmp):
-        if not strict:
-            warn('no upstream .sha1 for %s' % spec)
-            return True
-        return False
-    expected = open(tmp).read().split()[0]
-    actual = hashlib.sha1(open(path, 'rb').read()).hexdigest()
-    if expected == actual:
-        return True
-    if not strict:
-        warn('sha1 mismatch (lenient, continuing): %s expected=%s actual=%s' % (spec, expected, actual))
-        return True
-    print('sha1 mismatch: %s expected=%s actual=%s' % (spec, expected, actual), file=sys.stderr)
-    try:
-        os.remove(path); os.remove(tmp)
-    except OSError:
-        pass
-    return False
-
-
-def tempfile_path(path):
-    d = os.environ.get('TMPDIR') or os.path.join(os.environ.get('BH_AGENT_WORKSPACE') or '/tmp', 'apply-fixes-tmp')
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, os.path.basename(path) + '.sha1')
+        fatal('mvn-get could not download %s (rc=%d)' % (spec, r.returncode))
 
 
 def rewrap(dl, template, out, version):
@@ -480,41 +430,35 @@ def place(src, dst, mode):
 
 
 # ---------------------------------------------------------------- validation
-def member_problems(e, label):
-    """Why a member of a family switched to auto cannot be applied. Every switched-on
-    family is checked before anything is fetched or written."""
-    mech, out = e.get('mechanism'), []
-    name = '%s: %s/%s' % (label, e.get('group'), e.get('artifact'))
-    target, current, paths = e.get('target'), e.get('current'), e.get('paths') or []
-    if mech not in ('karaf', 'jar'):
-        return ['%s: mechanism must be karaf or jar, not %r (to leave it out, set the family lane to manual)'
-                % (name, mech)]
-    if not e.get('group') or not e.get('artifact') or not current:
-        out.append('%s: group, artifact and current are required' % name)
+def repo_rel(g, a, v):
+    """Where a bundle lives in the karaf system repo, relative to the filesystem root."""
+    return os.path.join(KARAF_SUB, 'system', g.replace('.', '/'), a, v, '%s-%s.jar' % (a, v))
+
+
+def patch_label(p, i):
+    return 'patch #%d (%s:%s)' % (i, p.get('groupId'), p.get('artifactId'))
+
+
+def patch_problems(p, label):
+    """Why a patch of a group set to apply cannot be applied. Every switched-on group
+    is checked before anything is fetched or written."""
+    out = []
+    method, target, current = p.get('method'), p.get('target'), p.get('current')
+    if method not in METHODS:
+        return ['%s: method %r is not supported (supported: %s)' % (label, method, ', '.join(METHODS))]
+    if not p.get('groupId') or not p.get('artifactId') or not current:
+        out.append('%s: groupId, artifactId and current are required' % label)
     if not target:
-        out.append('%s: no target version - there is nothing to apply' % name)
-    if not paths:
-        out.append('%s: no paths' % name)
-    in_repo = [p for p in paths if KARAF_REPO in '/' + p]
-    if mech == 'karaf':
-        if len(in_repo) != len(paths):
-            out.append('%s: mechanism karaf, but not every path is in the karaf system repo' % name)
-        pr = e.get('processing') or {}
-        repl, orig = pr.get('replacement') or '', pr.get('originalUri') or ''
-        if not repl or not orig:
-            out.append('%s: mechanism karaf needs processing.originalUri and processing.replacement' % name)
-        elif target and not (re.search(r'/%s(/|$)' % re.escape(target), repl)
-                             and (',%s)' % target) in orig):
-            out.append('%s: processing URIs (%s -> %s) do not move to target %s; fix them or the target'
-                       % (name, orig, repl, target))
-    else:
-        if in_repo:
-            out.append('%s: mechanism jar, but paths are in the karaf system repo' % name)
-        expect = '%s-%s.jar' % (e.get('artifact'), current)
-        odd = [p for p in paths if os.path.basename(p) != expect]
-        if odd:
-            out.append('%s: a jar swap replaces files named %s, but %s is not one (a fat or renamed jar '
-                       'would lose everything else in it)' % (name, expect, ', '.join(odd)))
+        out.append('%s: no target version - there is nothing to apply' % label)
+    elif current and vt(target) <= vt(current):
+        out.append('%s: target %s is not above current %s' % (label, target, current))
+    pr = p.get('processing') or {}
+    repl, orig = pr.get('replacement') or '', pr.get('originalUri') or ''
+    if not repl or not orig:
+        out.append('%s: method karaf needs processing.originalUri and processing.replacement' % label)
+    elif target and not (re.search(r'/%s(/|$)' % re.escape(target), repl) and (',%s)' % target) in orig):
+        out.append('%s: processing URIs (%s -> %s) do not move to target %s; fix them or the target'
+                   % (label, orig, repl, target))
     return out
 
 
@@ -526,44 +470,82 @@ def versions_as_text(e):
     return e
 
 
-def load_families(data, problems):
-    """Every entry is a family: members that move to one target together, switched
-    by the family's lane. A standalone fix is a family of one."""
-    families = []
-    for i, f in enumerate(data.get('families') or [], 1):
-        versions_as_text(f)
-        label = f.get('name') or 'family #%d' % i
-        lane = f.get('lane')
-        members = [versions_as_text(dict(m, target=f.get('target'))) for m in (f.get('patches') or [])]
-        if lane not in ('auto', 'manual'):
-            problems.append('%s: lane must be auto or manual, not %r' % (label, lane))
-        elif lane == 'auto':
-            if not members:
-                problems.append('%s: lane auto, but it has no patches' % label)
-            for m in members:
-                problems.extend(member_problems(m, label))
-        families.append({'label': label, 'apply': lane == 'auto', 'severity': sev_name(f.get('severity')),
-                         'target': f.get('target'), 'reason': f.get('reason'),
-                         'osgi_check': f.get('osgi_check'), 'members': members})
-    return families
+def load_groups(data, problems):
+    """groups name the units of work and carry the only switch; patches point at
+    their group by name. Referential integrity, one target per group and the
+    summaries are checked for every group; the operational checks only for groups
+    set to apply."""
+    raw = data.get('groups')
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        problems.append('groups must be a mapping of group name -> apply/severity/summary')
+        return {}
+    groups = {}
+    for name, g in raw.items():
+        if not isinstance(g, dict):
+            problems.append('group %s: must be a mapping with apply, severity and summary' % name)
+            continue
+        if not isinstance(g.get('apply'), bool):
+            problems.append('group %s: apply must be true or false, not %r' % (name, g.get('apply')))
+        groups[name] = {'name': name, 'apply': g.get('apply') is True, 'severity': sev_name(g.get('severity')),
+                        'note': g.get('note'), 'summary': g.get('summary') or [], 'patches': []}
+
+    seen = {}
+    for i, p in enumerate(data.get('patches') or [], 1):
+        if not isinstance(p, dict):
+            problems.append('patch #%d: must be a mapping' % i)
+            continue
+        versions_as_text(p)
+        label = patch_label(p, i)
+        pg = p.get('patch-group')
+        if pg not in groups:
+            problems.append('%s: patch-group %r is not defined under groups' % (label, pg))
+            continue
+        key = (p.get('groupId'), p.get('artifactId'), p.get('current'))
+        if key in seen:
+            problems.append('%s: same bundle as patch #%d - a bundle is patched once' % (label, seen[key]))
+            continue
+        seen[key] = i
+        groups[pg]['patches'].append((i, p))
+
+    for g in groups.values():
+        name, ps = g['name'], [p for _, p in g['patches']]
+        if not ps:
+            warn('group %s has no patches - nothing to apply' % name)
+        targets = sorted({str(p.get('target')) for p in ps})
+        if len(targets) > 1:
+            problems.append('group %s: patches move to different targets (%s); a group moves to one version'
+                            % (name, ', '.join(targets)))
+        want = sorted(('%s:%s:%s' % (p.get('groupId'), p.get('artifactId'), p.get('target')),
+                       repo_rel(p.get('groupId') or '', p.get('artifactId') or '', p.get('current') or ''))
+                      for p in ps)
+        have = sorted((str(x.get('artifact')), str(x.get('source'))) for x in g['summary'] if isinstance(x, dict))
+        if want != have or len(have) != len(g['summary']):
+            problems.append('group %s: summary does not match its patches; it should read:\n%s'
+                            % (name, '\n'.join('      - artifact: %s\n        source: %s' % w for w in want)))
+        if g['apply']:
+            for i, p in g['patches']:
+                problems.extend(patch_problems(p, '%s in group %s' % (patch_label(p, i), name)))
+        g['target'] = targets[0] if len(targets) == 1 else None
+        g['patches'] = ps
+    return groups
 
 
 # ---------------------------------------------------------------- main
 def main():
-    ap = argparse.ArgumentParser(description='Apply a committed YAML patch list during the container build.')
+    ap = argparse.ArgumentParser(description='Apply a committed YAML karaf patch list during the container build.')
     ap.add_argument('patches', help='path to the patch file (no default - must be given)')
     ap.add_argument('--levels', default=None,
                     help='severities to patch: comma-separated HIGH,CRIT (default; or settings.levels). '
                          'CRIT/CRITICAL, MED/MEDIUM, LOW, UNK/UNKNOWN, ALL')
     ap.add_argument('--snapshot', default=None,
-                    help='resolve the entry paths against an extracted tree instead of /; '
+                    help='resolve against an extracted tree instead of /; '
                          'for local verification runs only - inside the image / is the only root')
     ap.add_argument('--ignore', default=None,
                     help='severities to skip, applied after --levels')
     ap.add_argument('--dry-run', action='store_true', help='print the plan; no network, no writes')
     ap.add_argument('--check', action='store_true', help='fetch + verify + osgi check, write nothing')
-    ap.add_argument('--strict', action='store_true',
-                    help='fail the build on sha1 mismatch; default is lenient (warn and continue)')
     ap.add_argument('--no-osgi-check', dest='no_osgi_check', action='store_true',
                     help='skip the import-package check; it runs by default')
     ap.add_argument('--no-osgi-fail', dest='no_osgi_fail', action='store_true',
@@ -574,27 +556,21 @@ def main():
     if not os.path.exists(args.patches):
         fatal('patch file not found: %s' % args.patches)
     data = yaml_parse(open(args.patches).read(), args.patches)
-    old = [k for k in ('karaf', 'jars', 'manual', 'patches') if k in data]
+    old = [k for k in ('families', 'karaf', 'jars', 'manual') if k in data]
     if old:
-        fatal('%s uses the old sectioned layout (%s); regenerate it with generate-patch-lists'
+        fatal('%s uses an old layout (%s); regenerate it with generate-patch-lists'
               % (args.patches, ', '.join(old)))
-    for k in data:
-        if k not in TOP_KEYS:
-            warn('top-level key %r is not read by this script - ignored' % k)
-    settings = data.get('settings') or {}
-    for k in sorted(settings):
-        if k not in SETTINGS_KEYS:
-            warn('settings key %r is not read by this script - ignored' % k)
+    settings = data.get('settings') or {}         # keys this script does not read are ignored
 
     problems = []
-    units = load_families(data, problems)
+    groups = load_groups(data, problems)
     if problems:
         fatal('%s cannot be applied as written:\n  %s' % (args.patches, '\n  '.join(problems)))
 
-    # Entry paths are relative to the filesystem root, exactly as Trivy reports them.
-    # The root is not recorded in the patch file: inside the image / is the only root
-    # that exists, so it is the default. --snapshot is the single exception, for a
-    # local run against an extracted tree, and must be given on the command line.
+    # Bundle locations follow from their coordinates under the karaf system repo. The
+    # root is not recorded in the patch file: inside the image / is the only root that
+    # exists, so it is the default. --snapshot is the single exception, for a local
+    # run against an extracted tree, and must be given on the command line.
     root = args.snapshot or '/'
     if not os.path.isabs(root):
         fatal('--snapshot must be an absolute path: %s' % root)
@@ -605,23 +581,35 @@ def main():
     if not os.path.isdir(karaf_system):
         fatal('karaf system repo not found under %s' % root)
 
+    def repo_jar(p, version):
+        return os.path.join(karaf_system, p['groupId'].replace('.', '/'), p['artifactId'], version,
+                            '%s-%s.jar' % (p['artifactId'], version))
+
     write = not (args.dry_run or args.check)
     fetch_it = not args.dry_run
-    strict = args.strict or settings.get('strict_sha1')
     run_check = not args.no_osgi_check
     fail_on_check = run_check and not args.no_osgi_fail
     levels = sev_level_set(args.levels or settings.get('levels') or DEFAULT_LEVELS)
     ignore = sev_level_set(args.ignore if args.ignore is not None else settings.get('ignore'))
 
-    def selected(u):
-        if u['severity'] in ignore:
+    def selected(g):
+        if g['severity'] in ignore:
             return False
-        return 'ALL' in levels or u['severity'] in levels
+        return 'ALL' in levels or g['severity'] in levels
 
-    to_apply = [u for u in units if u['apply'] and selected(u)]
-    out_of_scope = [u for u in units if u['apply'] and not selected(u)]
-    pending = [u for u in units if not u['apply']]
-    work = [dict(m, sev=u['severity'], unit=u['label']) for u in to_apply for m in u['members']]
+    units = list(groups.values())
+    to_apply = [g for g in units if g['apply'] and selected(g) and g['patches']]
+    out_of_scope = [g for g in units if g['apply'] and not selected(g)]
+    disabled = [g for g in units if not g['apply']]
+    work = [dict(p, unit=g['name']) for g in to_apply for p in g['patches']]
+
+    # every bundle to move must be where its coordinates say (or already moved)
+    missing = ['%s:%s:%s (group %s) not found at %s' % (p['groupId'], p['artifactId'], p['current'], p['unit'],
+                                                        os.path.relpath(repo_jar(p, p['current']), root))
+               for p in work if not os.path.exists(repo_jar(p, p['current']))
+               and not os.path.exists(repo_jar(p, p['target']))]
+    if missing:
+        fatal('bundles to patch are not in the karaf system repo:\n  %s' % '\n  '.join(missing))
 
     print('patch file  : %s' % args.patches)
     print('root        : %s%s' % (root, ' (--snapshot, local run only)' if args.snapshot else ''))
@@ -630,23 +618,23 @@ def main():
     print('osgi check  : %s' % ('on, fails the build' if fail_on_check
                                  else 'on, warnings only (--no-osgi-fail)'
                                  if run_check else 'off (--no-osgi-check)'))
-    print('sha1        : %s' % ('strict' if strict else 'lenient (warns, continues)'))
-    print('families    : %d (%d set to auto, %d manual)'
-          % (len(units), sum(u['apply'] for u in units), len(pending)))
-    print('applying    : %d families, %d bundles/jars (%d karaf, %d jar)'
-          % (len(to_apply), len(work), sum(e['mechanism'] == 'karaf' for e in work),
-             sum(e['mechanism'] == 'jar' for e in work)))
+    print('groups      : %d (%d set to apply, %d disabled)'
+          % (len(units), sum(g['apply'] for g in units), len(disabled)))
+    print('applying    : %d groups, %d bundles' % (len(to_apply), len(work)))
     if out_of_scope:
         print('out of severity scope (%d, not applied):' % len(out_of_scope))
-        for u in out_of_scope:
-            print('  %s %s -> %s' % (u['severity'], u['label'], u['target']))
-    if pending:
-        print('manual (%d, not applied):' % len(pending))
-        for u in pending:
-            print('  %s %s -> %s%s' % (u['severity'], u['label'], u['target'] or '-',
-                                       (' - ' + u['reason']) if u['reason'] else ''))
+        for g in out_of_scope:
+            print('  %s %s -> %s' % (g['severity'], g['name'], g['target']))
+    if disabled:
+        print('disabled (%d, not applied):' % len(disabled))
+        for g in disabled:
+            print('  %s %s -> %s%s' % (g['severity'], g['name'], g['target'] or '-',
+                                       (' - ' + g['note']) if g['note'] else ''))
 
-    if settings.get('feature_processing') and any(e['mechanism'] == 'karaf' for e in work):
+    if work and fetch_it and not shutil.which('mvn-get'):
+        fatal('mvn-get is not on the PATH; it comes with the base image and is required to fetch bundles')
+
+    if work:                       # bundleReplacements are ignored unless feature processing is on
         cfg = os.path.join(karaf_home, 'etc/org.apache.karaf.features.cfg')
         if write:
             ensure_feature_processing(cfg)
@@ -659,49 +647,31 @@ def main():
     for e in work:
         if e['unit'] not in shown:
             shown.add(e['unit'])
-            u = next(x for x in to_apply if x['label'] == e['unit'])
-            print('%s -> %s (%s, %d member%s)' % (u['label'], u['target'], u['severity'], len(u['members']),
-                                                's' if len(u['members']) > 1 else ''))
-            if not fetch_it and u.get('osgi_check'):
-                print('  osgi check (recorded at generation time): %s' % u['osgi_check'].get('status'))
-        group, artifact, target, cur, mech = e['group'], e['artifact'], e['target'], e['current'], e['mechanism']
+            g = groups[e['unit']]
+            print('%s -> %s (%s, %d bundle%s)' % (g['name'], g['target'], g['severity'], len(g['patches']),
+                                                's' if len(g['patches']) > 1 else ''))
+        group, artifact, target, cur = e['groupId'], e['artifactId'], e['target'], e['current']
         spec = '%s:%s:%s:jar' % (group, artifact, target)
-        classifier = (e.get('processing') or {}).get('classifier') or e.get('classifier')
+        classifier = (e.get('processing') or {}).get('classifier')
         if classifier:
             spec += ':%s' % classifier
-        print('  %s %s/%s %s -> %s' % (mech, group, artifact, cur, target))
-        gpath = group.replace('.', '/')
-        arch = os.path.join(karaf_system, gpath, artifact)
-        arch_cur = os.path.join(arch, cur, '%s-%s.jar' % (artifact, cur))
-        arch_tgt = os.path.join(arch, target, '%s-%s.jar' % (artifact, target))
+        print('  karaf %s/%s %s -> %s' % (group, artifact, cur, target))
+        arch_cur, arch_tgt = repo_jar(e, cur), repo_jar(e, target)
 
-        if mech == 'karaf' and os.path.exists(arch_tgt):
+        if os.path.exists(arch_tgt):
             note('  already seeded, skipped')
             staged.append((e, arch_tgt))
             continue
 
         if not fetch_it:
-            print('  plan: fetch %s%s' % (artifact_url(spec), ' (wrap if the upstream jar is not an OSGi bundle)'
-                                          if mech == 'karaf' else ''))
-            if mech == 'karaf':
-                pr = e.get('processing') or {}
-                print('  plan: %s bundleReplacement %s' % (pr.get('action') or 'add', pr.get('originalUri')))
-            else:
-                for p in e.get('paths', []):
-                    print('  plan: replace %s' % p)
+            pr = e.get('processing') or {}
+            print('  plan: mvn-get %s (wrap if the upstream jar is not an OSGi bundle)' % spec)
+            print('  plan: %s bundleReplacement %s' % (pr.get('action') or 'add', pr.get('originalUri')))
             continue
 
         out = os.path.join(os.environ.get('TMPDIR') or '/tmp', '%s-%s.jar' % (artifact, target))
         fetch(spec, out)
-        if not verify_sha1(spec, out, strict):
-            fatal('sha1 verification failed for %s (strict)' % spec)
-        if mech != 'karaf':
-            staged.append((e, out))
-            continue
-
         if not manifest(out):
-            if not os.path.exists(arch_cur):
-                fatal('no template manifest to wrap %s' % spec)
             wrapped = out + '.wrapped'
             rewrap(out, arch_cur, wrapped, target)
             out = wrapped
@@ -713,40 +683,8 @@ def main():
 
     # ---- pass 2: write ----
     for e, placed in staged:
-        group, artifact, target, cur, mech = e['group'], e['artifact'], e['target'], e['current'], e['mechanism']
-        if mech != 'karaf':
-            for p in e.get('paths', []):
-                full = os.path.join(root, p)
-                if not (os.path.exists(full) or os.path.islink(full)):
-                    warn('  path not present, skipped: %s' % p)
-                    continue
-                new = os.path.join(os.path.dirname(full), '%s-%s.jar' % (artifact, target))
-                if not write:
-                    print('  plan: replace %s' % p)
-                    continue
-                if os.path.islink(full):
-                    real = os.path.realpath(full)
-                    dst = os.path.join(os.path.dirname(real), '%s-%s.jar' % (artifact, target))
-                    if os.path.abspath(real) != os.path.abspath(dst):
-                        place(placed, dst, os.stat(real).st_mode & 0o777)
-                        os.remove(real)
-                        print('  replaced %s' % os.path.basename(real))
-                    os.remove(full)
-                    os.symlink('%s-%s.jar' % (artifact, target), full)
-                    print('  re-pointed symlink %s' % os.path.basename(full))
-                else:
-                    place(placed, new, os.stat(full).st_mode & 0o777)
-                    if os.path.abspath(full) != os.path.abspath(new):
-                        os.remove(full)
-                        print('  replaced %s' % p)
-                    else:
-                        print('  already at target version: %s' % p)
-            continue
-
-        gpath = group.replace('.', '/')
-        arch = os.path.join(karaf_system, gpath, artifact)
-        arch_cur = os.path.join(arch, cur, '%s-%s.jar' % (artifact, cur))
-        arch_tgt = os.path.join(arch, target, '%s-%s.jar' % (artifact, target))
+        artifact, target, cur = e['artifactId'], e['target'], e['current']
+        arch_cur, arch_tgt = repo_jar(e, cur), repo_jar(e, target)
         pr = e.get('processing') or {}
         uri, repl = pr['originalUri'], pr['replacement']
         mode = pr.get('mode') or 'maven'
@@ -755,34 +693,30 @@ def main():
             print('  plan: place %s, remove %s' % (arch_tgt, arch_cur))
             print('  plan: %s bundleReplacement %s' % (pr.get('action') or 'add', uri))
             continue
-        os.makedirs(os.path.join(arch, target), exist_ok=True)
+        os.makedirs(os.path.dirname(arch_tgt), exist_ok=True)
         place(placed, arch_tgt, 0o640)
-        cur_dir = arch_cur.rsplit('/', 1)[0]
+        cur_dir = os.path.dirname(arch_cur)
         if os.path.isdir(cur_dir) and os.path.abspath(placed) != os.path.abspath(arch_cur):
             shutil.rmtree(cur_dir)
-            print('  removed superseded %s' % os.path.dirname(arch_cur))
+            print('  removed superseded %s' % cur_dir)
         features_xml(os.path.join(karaf_home, 'etc/org.apache.karaf.features.xml'), uri, repl, mode, bsn)
 
-    # ---- pass 3: osgi check over the final tree. Every member of every family is in
-    # place (or, in --check, staged) before any consumer is checked, so a family is
+    # ---- pass 3: osgi check over the final tree. Every patch of every group is in
+    # place (or, in --check, staged) before any consumer is checked, so a group is
     # never judged half-moved ----
     failures = []
     if run_check and fetch_it:
-        karaf_staged = [(e, p) for e, p in staged if e['mechanism'] == 'karaf']
         overlay = {}
         if not write:
-            for e, placed in karaf_staged:
-                cur = os.path.join(karaf_system, e['group'].replace('.', '/'), e['artifact'],
-                                   e['current'], '%s-%s.jar' % (e['artifact'], e['current']))
-                overlay[os.path.normpath(cur)] = placed
-        for e, placed in karaf_staged:
+            for e, placed in staged:
+                overlay[os.path.normpath(repo_jar(e, e['current']))] = placed
+        for e, placed in staged:
             if write:
-                placed = os.path.join(karaf_system, e['group'].replace('.', '/'), e['artifact'],
-                                      e['target'], '%s-%s.jar' % (e['artifact'], e['target']))
+                placed = repo_jar(e, e['target'])
             if not os.path.exists(placed):
                 continue
             if not osgi_check(placed, karaf_system, e['current'], overlay):
-                failures.append('%s/%s' % (e['group'], e['artifact']))
+                failures.append('%s/%s' % (e['groupId'], e['artifactId']))
         if failures:
             if fail_on_check:
                 fatal('osgi check failed for: %s' % ', '.join(failures))
