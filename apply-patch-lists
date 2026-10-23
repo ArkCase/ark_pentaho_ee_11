@@ -13,8 +13,9 @@
 #   <patches.yaml>  the patch file. Always a parameter - nothing is auto-found.
 #                   It is committed to the repo, hand-edited as needed, and read
 #                   at build time.
-#   root            NOT a parameter and NOT recorded anywhere: bundle locations
-#                   follow from their coordinates under the karaf system repo, and
+#   root            NOT a parameter and NOT recorded anywhere: each patch names its
+#                   karaf home relative to the filesystem root, bundle locations
+#                   follow from their coordinates under that home's system repo, and
 #                   at build time the root is / - the only root that exists inside
 #                   the image. A local run against an extracted tree is the single
 #                   exception and must be stated explicitly with --snapshot.
@@ -82,8 +83,6 @@ import sys
 import zipfile
 import xml.etree.ElementTree as ET
 
-KARAF_SUB = 'app/pentaho/pentaho-server/pentaho-solutions/system/karaf'
-KARAF_REPO = '/system/karaf/system/'
 NS = 'http://karaf.apache.org/xmlns/features-processing/v1.0.0'
 
 SEV_RANK = {'CRITICAL': 5, 'HIGH': 4, 'MEDIUM': 3, 'LOW': 2, 'UNKNOWN': 1}
@@ -430,9 +429,10 @@ def place(src, dst, mode):
 
 
 # ---------------------------------------------------------------- validation
-def repo_rel(g, a, v):
-    """Where a bundle lives in the karaf system repo, relative to the filesystem root."""
-    return os.path.join(KARAF_SUB, 'system', g.replace('.', '/'), a, v, '%s-%s.jar' % (a, v))
+def repo_rel(home, g, a, v):
+    """Where a bundle lives in the system repo of the karaf at `home` (Maven layout),
+    relative to the filesystem root."""
+    return os.path.normpath(os.path.join(home, 'system', g.replace('.', '/'), a, v, '%s-%s.jar' % (a, v)))
 
 
 def patch_label(p, i):
@@ -446,8 +446,8 @@ def patch_problems(p, label):
     method, target, current = p.get('method'), p.get('target'), p.get('current')
     if method not in METHODS:
         return ['%s: method %r is not supported (supported: %s)' % (label, method, ', '.join(METHODS))]
-    if not p.get('groupId') or not p.get('artifactId') or not current:
-        out.append('%s: groupId, artifactId and current are required' % label)
+    if not p.get('karaf') or not p.get('groupId') or not p.get('artifactId') or not current:
+        out.append('%s: karaf, groupId, artifactId and current are required' % label)
     if not target:
         out.append('%s: no target version - there is nothing to apply' % label)
     elif current and vt(target) <= vt(current):
@@ -502,7 +502,7 @@ def load_groups(data, problems):
         if pg not in groups:
             problems.append('%s: patch-group %r is not defined under groups' % (label, pg))
             continue
-        key = (p.get('groupId'), p.get('artifactId'), p.get('current'))
+        key = (p.get('karaf'), p.get('groupId'), p.get('artifactId'), p.get('current'))
         if key in seen:
             problems.append('%s: same bundle as patch #%d - a bundle is patched once' % (label, seen[key]))
             continue
@@ -518,7 +518,8 @@ def load_groups(data, problems):
             problems.append('group %s: patches move to different targets (%s); a group moves to one version'
                             % (name, ', '.join(targets)))
         want = sorted(('%s:%s:%s' % (p.get('groupId'), p.get('artifactId'), p.get('target')),
-                       repo_rel(p.get('groupId') or '', p.get('artifactId') or '', p.get('current') or ''))
+                       repo_rel(str(p.get('karaf') or ''), p.get('groupId') or '', p.get('artifactId') or '',
+                                p.get('current') or ''))
                       for p in ps)
         have = sorted((str(x.get('artifact')), str(x.get('source'))) for x in g['summary'] if isinstance(x, dict))
         if want != have or len(have) != len(g['summary']):
@@ -567,8 +568,9 @@ def main():
     if problems:
         fatal('%s cannot be applied as written:\n  %s' % (args.patches, '\n  '.join(problems)))
 
-    # Bundle locations follow from their coordinates under the karaf system repo. The
-    # root is not recorded in the patch file: inside the image / is the only root that
+    # Each patch names its karaf home relative to the filesystem root; bundle locations
+    # follow from their coordinates under that home's system repo. The root is not
+    # recorded in the patch file: inside the image / is the only root that
     # exists, so it is the default. --snapshot is the single exception, for a local
     # run against an extracted tree, and must be given on the command line.
     root = args.snapshot or '/'
@@ -576,14 +578,12 @@ def main():
         fatal('--snapshot must be an absolute path: %s' % root)
     if args.snapshot:
         warn('resolving against %s instead of / - local run only; the build always uses /' % root)
-    karaf_home = os.path.join(root, KARAF_SUB)
-    karaf_system = os.path.join(karaf_home, 'system')
-    if not os.path.isdir(karaf_system):
-        fatal('karaf system repo not found under %s' % root)
+
+    def karaf_home(p):
+        return os.path.normpath(os.path.join(root, p['karaf']))
 
     def repo_jar(p, version):
-        return os.path.join(karaf_system, p['groupId'].replace('.', '/'), p['artifactId'], version,
-                            '%s-%s.jar' % (p['artifactId'], version))
+        return os.path.join(root, repo_rel(p['karaf'], p['groupId'], p['artifactId'], version))
 
     write = not (args.dry_run or args.check)
     fetch_it = not args.dry_run
@@ -602,6 +602,10 @@ def main():
     out_of_scope = [g for g in units if g['apply'] and not selected(g)]
     disabled = [g for g in units if not g['apply']]
     work = [dict(p, unit=g['name']) for g in to_apply for p in g['patches']]
+    homes = sorted({p['karaf'] for p in work})
+    absent = [h for h in homes if not os.path.isdir(os.path.join(root, h, 'system'))]
+    if absent:
+        fatal('karaf system repo not found under %s for: %s' % (root, ', '.join(absent)))
 
     # every bundle to move must be where its coordinates say (or already moved)
     missing = ['%s:%s:%s (group %s) not found at %s' % (p['groupId'], p['artifactId'], p['current'], p['unit'],
@@ -634,12 +638,12 @@ def main():
     if work and fetch_it and not shutil.which('mvn-get'):
         fatal('mvn-get is not on the PATH; it comes with the base image and is required to fetch bundles')
 
-    if work:                       # bundleReplacements are ignored unless feature processing is on
-        cfg = os.path.join(karaf_home, 'etc/org.apache.karaf.features.cfg')
+    for h in homes:                # bundleReplacements are ignored unless feature processing is on
+        cfg = os.path.join(root, h, 'etc/org.apache.karaf.features.cfg')
         if write:
             ensure_feature_processing(cfg)
         else:
-            print('plan: ensure featureProcessing=org.apache.karaf.features.xml in %s' % os.path.basename(cfg))
+            print('plan: ensure featureProcessing=org.apache.karaf.features.xml in %s' % os.path.relpath(cfg, root))
 
     # ---- pass 1: fetch and verify everything (so the osgi check sees the final tree) ----
     staged = []
@@ -699,7 +703,7 @@ def main():
         if os.path.isdir(cur_dir) and os.path.abspath(placed) != os.path.abspath(arch_cur):
             shutil.rmtree(cur_dir)
             print('  removed superseded %s' % cur_dir)
-        features_xml(os.path.join(karaf_home, 'etc/org.apache.karaf.features.xml'), uri, repl, mode, bsn)
+        features_xml(os.path.join(karaf_home(e), 'etc/org.apache.karaf.features.xml'), uri, repl, mode, bsn)
 
     # ---- pass 3: osgi check over the final tree. Every patch of every group is in
     # place (or, in --check, staged) before any consumer is checked, so a group is
@@ -715,7 +719,7 @@ def main():
                 placed = repo_jar(e, e['target'])
             if not os.path.exists(placed):
                 continue
-            if not osgi_check(placed, karaf_system, e['current'], overlay):
+            if not osgi_check(placed, os.path.join(karaf_home(e), 'system'), e['current'], overlay):
                 failures.append('%s/%s' % (e['groupId'], e['artifactId']))
         if failures:
             if fail_on_check:

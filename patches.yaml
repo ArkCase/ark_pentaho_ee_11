@@ -12,8 +12,8 @@ settings:
   levels: HIGH,CRIT
 
 header:
-  source_sha256: 33e7b855b5ffb861d9f267d00998e38a3618169c83b5f7adbf60bd03ff1aa2fe
-  scan_artifact: 207428623785.dkr.ecr.us-east-1.amazonaws.com/arkcase/pentaho-ee-11:11.0.0.3_b80
+  source_sha256: 5b7fc2e43ced524e1d03de5daf77bacd7320b0e29eff0c109562fa5b4635b532
+  scan_artifact: harbor.rivera.prv/arkcase/pentaho-ee-11:devel-11.0.0.3
 
 groups:
   bouncycastle:
@@ -31,7 +31,7 @@ groups:
   cxf:
     apply: false
     severity: CRITICAL
-    note: "major version jump (3.6.8 -> 4.1.7); vendor wraps cannot be swapped and stay on their version: cxf-rt-frontend-jaxrs-wrap-3.6.8.jar, cxf-rt-transports-http-wrap-3.6.8.jar"
+    note: "major version jump (3.6.8 -> 4.1.7); repackaged copies cannot be swapped and stay on their version: cxf-rt-frontend-jaxrs-wrap-3.6.8.jar, cxf-rt-transports-http-wrap-3.6.8.jar"
     summary:
       - artifact: org.apache.cxf:cxf-core:4.1.7
         source: app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/apache/cxf/cxf-core/3.6.8/cxf-core-3.6.8.jar
@@ -49,6 +49,8 @@ groups:
         source: app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/apache/cxf/cxf-rt-rs-service-description/3.6.8/cxf-rt-rs-service-description-3.6.8.jar
       - artifact: org.apache.cxf:cxf-rt-security:4.1.7
         source: app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/apache/cxf/cxf-rt-security/3.6.8/cxf-rt-security-3.6.8.jar
+      - artifact: org.apache.cxf.karaf:cxf-karaf-commands:4.1.7
+        source: app/pentaho/pentaho-server/pentaho-solutions/system/karaf/system/org/apache/cxf/karaf/cxf-karaf-commands/3.6.8/cxf-karaf-commands-3.6.8.jar
 
   jackson:
     apply: true
@@ -78,6 +80,7 @@ groups:
 patches:
   - patch-group: bouncycastle
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: org.bouncycastle
     artifactId: bcpkix-jdk18on
     current: "1.84"
@@ -92,6 +95,7 @@ patches:
 
   - patch-group: bouncycastle
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: org.bouncycastle
     artifactId: bcprov-jdk18on
     current: "1.84"
@@ -106,6 +110,7 @@ patches:
 
   - patch-group: bouncycastle
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: org.bouncycastle
     artifactId: bcutil-jdk18on
     current: "1.84"
@@ -120,6 +125,7 @@ patches:
 
   - patch-group: cxf
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: org.apache.cxf
     artifactId: cxf-core
     current: "3.6.8"
@@ -133,6 +139,7 @@ patches:
 
   - patch-group: cxf
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: org.apache.cxf
     artifactId: cxf-rt-management
     current: "3.6.8"
@@ -146,6 +153,7 @@ patches:
 
   - patch-group: cxf
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: org.apache.cxf
     artifactId: cxf-rt-rs-client
     current: "3.6.8"
@@ -159,6 +167,7 @@ patches:
 
   - patch-group: cxf
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: org.apache.cxf
     artifactId: cxf-rt-rs-extension-providers
     current: "3.6.8"
@@ -172,6 +181,7 @@ patches:
 
   - patch-group: cxf
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: org.apache.cxf
     artifactId: cxf-rt-rs-extension-search
     current: "3.6.8"
@@ -185,6 +195,7 @@ patches:
 
   - patch-group: cxf
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: org.apache.cxf
     artifactId: cxf-rt-rs-json-basic
     current: "3.6.8"
@@ -198,6 +209,7 @@ patches:
 
   - patch-group: cxf
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: org.apache.cxf
     artifactId: cxf-rt-rs-service-description
     current: "3.6.8"
@@ -211,6 +223,7 @@ patches:
 
   - patch-group: cxf
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: org.apache.cxf
     artifactId: cxf-rt-security
     current: "3.6.8"
@@ -222,8 +235,23 @@ patches:
       replacement: mvn:org.apache.cxf/cxf-rt-security/4.1.7
       mode: maven
 
+  - patch-group: cxf
+    method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
+    groupId: org.apache.cxf.karaf
+    artifactId: cxf-karaf-commands
+    current: "3.6.8"
+    target: "4.1.7"
+    symbolic_name: org.apache.cxf.karaf.cxf-karaf-commands
+    processing:
+      action: add
+      originalUri: mvn:org.apache.cxf.karaf/cxf-karaf-commands/[3.6.8,4.1.7)
+      replacement: mvn:org.apache.cxf.karaf/cxf-karaf-commands/4.1.7
+      mode: maven
+
   - patch-group: jackson
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: com.fasterxml.jackson.core
     artifactId: jackson-annotations
     current: "2.18.8"
@@ -238,6 +266,7 @@ patches:
 
   - patch-group: jackson
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: com.fasterxml.jackson.core
     artifactId: jackson-core
     current: "2.18.8"
@@ -252,6 +281,7 @@ patches:
 
   - patch-group: jackson
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: com.fasterxml.jackson.core
     artifactId: jackson-databind
     current: "2.18.8"
@@ -266,6 +296,7 @@ patches:
 
   - patch-group: jackson
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: com.fasterxml.jackson.jaxrs
     artifactId: jackson-jaxrs-base
     current: "2.18.8"
@@ -280,6 +311,7 @@ patches:
 
   - patch-group: jackson
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: com.fasterxml.jackson.jaxrs
     artifactId: jackson-jaxrs-json-provider
     current: "2.18.8"
@@ -294,6 +326,7 @@ patches:
 
   - patch-group: jackson
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: com.fasterxml.jackson.module
     artifactId: jackson-module-jaxb-annotations
     current: "2.18.8"
@@ -308,6 +341,7 @@ patches:
 
   - patch-group: commons-lang3
     method: karaf
+    karaf: app/pentaho/pentaho-server/pentaho-solutions/system/karaf
     groupId: org.apache.commons
     artifactId: commons-lang3
     current: "3.14.0"
