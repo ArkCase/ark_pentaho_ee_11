@@ -74,12 +74,14 @@
 # generator writes, plus the usual hand edits (comments, quoting, flow lists).
 
 import argparse
+import atexit
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -105,8 +107,10 @@ def sev_level_set(csv):
             continue
         if part == 'ALL':
             out.add('ALL')
+        elif part in SEV_ALIAS:
+            out.add(SEV_ALIAS[part])
         else:
-            out.add(SEV_ALIAS.get(part, part))
+            fatal('unknown severity level %r (use CRIT/CRITICAL, HIGH, MED/MEDIUM, LOW, UNK/UNKNOWN, ALL)' % part)
     return out
 
 
@@ -259,7 +263,8 @@ def _value(v, n, ctx):
 # ---------------------------------------------------------------- OSGi helpers
 def manifest(path):
     try:
-        raw = zipfile.ZipFile(path).read('META-INF/MANIFEST.MF').decode('utf-8', 'replace')
+        with zipfile.ZipFile(path) as z:
+            raw = z.read('META-INF/MANIFEST.MF').decode('utf-8', 'replace')
     except Exception:
         return None
     lines = []
@@ -273,13 +278,12 @@ def manifest(path):
 
 
 def clauses(s):
-    out, cur, inb = [], '', False
+    # Commas also occur within quoted values: version="[1,2)", uses:="a.b,c.d"
+    out, cur, inq = [], '', False
     for ch in s:
-        if ch == '[':
-            inb = True
-        elif ch == ']':
-            inb = False
-        if ch == ',' and not inb:
+        if ch == '"':
+            inq = not inq
+        if ch == ',' and not inq:
             if cur.strip():
                 out.append(cur.strip())
             cur = ''
@@ -294,15 +298,28 @@ def vt(s):
     return tuple(int(x) for x in re.findall(r'\d+', s)) or (0,)
 
 
+def vcmp(a, b):
+    """Compare version tuples; missing segments are 0, so 1.2 and 1.2.0 are equal."""
+    n = max(len(a), len(b))
+    a, b = a + (0,) * (n - len(a)), b + (0,) * (n - len(b))
+    return (a > b) - (a < b)
+
+
+def version_attr(clause):
+    """The version attribute of a header clause, not bundle-version and the like."""
+    x = re.search(r';\s*version\s*=\s*"?([^";]+)"?', clause)
+    return x.group(1).strip() if x else None
+
+
 def sat(rng, ver):
     if not rng:
         return True
-    m = re.match(r'^\[(.+?),(.+?)([)\]])$', rng)
-    if not m:
-        return vt(ver) >= vt(rng)
-    lo, hi, closed = vt(m.group(1)), vt(m.group(2)), m.group(3) == ']'
+    m = re.match(r'^([\[(])(.+?),(.+?)([)\]])$', rng)
     v = vt(ver)
-    return not (v < lo or v > hi or (v == hi and not closed))
+    if not m:
+        return vcmp(v, vt(rng)) >= 0
+    lo, hi = vcmp(v, vt(m.group(2))), vcmp(v, vt(m.group(3)))
+    return not (lo < 0 or (lo == 0 and m.group(1) == '(') or hi > 0 or (hi == 0 and m.group(4) == ')'))
 
 
 def export_versions(man):
@@ -310,8 +327,7 @@ def export_versions(man):
     out = {}
     for c in clauses(man.get('Export-Package') or ''):
         pkg = c.split(';')[0]
-        x = re.search(r'version="([^"]+)"', c)
-        out[pkg] = x.group(1) if x else ver
+        out[pkg] = version_attr(c) or ver
     return out
 
 
@@ -324,6 +340,13 @@ def fetch(spec, out):
         fatal('mvn-get could not download %s (rc=%d)' % (spec, r.returncode))
 
 
+def manifest_line(line):
+    """A manifest line folded at 72 bytes: longer ones are invalid, and past 512 bytes
+    java.util.jar.Manifest refuses them outright (line too long)."""
+    raw = line.encode('utf-8')
+    return b'\r\n'.join([raw[:72]] + [b' ' + raw[i:i + 71] for i in range(72, len(raw), 71)])
+
+
 def rewrap(dl, template, out, version):
     headers = manifest(template)
     if not headers:
@@ -333,9 +356,9 @@ def rewrap(dl, template, out, version):
             if item.filename == 'META-INF/MANIFEST.MF':
                 continue
             zout.writestr(item, zin.read(item.filename))
-        mf = '\r\n'.join('%s: %s' % (k, v) for k, v in headers.items() if k != 'Bundle-Version')
-        mf = 'Manifest-Version: 1.0\r\n' + mf + '\r\nBundle-Version: %s\r\n\r\n' % version
-        zout.writestr('META-INF/MANIFEST.MF', mf)
+        mf = ['%s: %s' % (k, v) for k, v in headers.items() if k not in ('Manifest-Version', 'Bundle-Version')]
+        mf = ['Manifest-Version: 1.0'] + mf + ['Bundle-Version: %s' % version]
+        zout.writestr('META-INF/MANIFEST.MF', b'\r\n'.join(manifest_line(l) for l in mf) + b'\r\n\r\n')
 
 
 def features_xml(path, uri, repl, mode, bsn):
@@ -377,11 +400,14 @@ def ensure_feature_processing(cfg_path):
     print('enabled featureProcessing in %s' % os.path.basename(cfg_path))
 
 
-def osgi_check(jar, karaf_system, pre_ver, overlay=None):
+def osgi_check(jar, karaf_system, pre_ver, overlay=None, pre_exports=None):
     """Check every consumer under karaf_system against jar's exports. overlay maps a
     jar in the tree to the fetched jar that replaces it, so --check (which writes
-    nothing) still judges the final tree, with every family member moved."""
+    nothing) still judges the final tree, with every family member moved. pre_exports
+    holds the package versions the superseded jar exported, which tell a violation
+    this move introduces from one that was already there."""
     overlay = overlay or {}
+    pre_exports = pre_exports or {}
     man = manifest(jar)
     if not man:
         print('  osgi check: no manifest on %s (plain jar) - nothing to check' % os.path.basename(jar))
@@ -403,14 +429,13 @@ def osgi_check(jar, karaf_system, pre_ver, overlay=None):
                 if pkg not in ex:
                     continue
                 checked += 1
-                x = re.search(r'version="([^"]+)"', c)
-                rng = x.group(1) if x else None
+                rng = version_attr(c)
                 if sat(rng, ex[pkg]):
                     continue
                 row = (m.get('Bundle-SymbolicName', '?'), pkg, rng, ex[pkg])
                 if ';resolution:=optional' in c:
                     opt.append(row)
-                elif sat(rng, pre_ver):
+                elif sat(rng, pre_exports.get(pkg, pre_ver)):
                     bad.append(row)
                 else:
                     pre.append(row)
@@ -665,6 +690,9 @@ def main():
             print('plan: ensure featureProcessing=org.apache.karaf.features.xml in %s' % os.path.relpath(cfg, root))
 
     # ---- pass 1: fetch and verify everything (so the osgi check sees the final tree) ----
+    if work and fetch_it:
+        fetch_dir = tempfile.mkdtemp(prefix='karaf-patches-')
+        atexit.register(shutil.rmtree, fetch_dir, ignore_errors=True)
     staged = []
     shown = set()
     for e in work:
@@ -680,6 +708,7 @@ def main():
             spec += ':%s' % classifier
         print('  karaf %s/%s %s -> %s' % (group, artifact, cur, target))
         arch_cur, arch_tgt = repo_jar(e, cur), repo_jar(e, target)
+        e['pre_exports'] = export_versions(manifest(arch_cur) or {})
 
         if os.path.exists(arch_tgt):
             note('  already seeded, skipped')
@@ -692,9 +721,10 @@ def main():
             print('  plan: %s bundleReplacement %s' % (pr.get('action') or 'add', pr.get('originalUri')))
             continue
 
-        out = os.path.join(os.environ.get('TMPDIR') or '/tmp', '%s-%s.jar' % (artifact, target))
+        # Numbered: artifacts of different groupIds can share a name and a version
+        out = os.path.join(fetch_dir, '%d-%s-%s.jar' % (len(staged), artifact, target))
         fetch(spec, out)
-        if not manifest(out):
+        if not (manifest(out) or {}).get('Bundle-SymbolicName'):
             wrapped = out + '.wrapped'
             rewrap(out, arch_cur, wrapped, target)
             out = wrapped
@@ -738,7 +768,7 @@ def main():
                 placed = repo_jar(e, e['target'])
             if not os.path.exists(placed):
                 continue
-            if not osgi_check(placed, os.path.join(karaf_home(e), 'system'), e['current'], overlay):
+            if not osgi_check(placed, os.path.join(karaf_home(e), 'system'), e['current'], overlay, e['pre_exports']):
                 failures.append('%s/%s' % (e['groupId'], e['artifactId']))
         if failures:
             if fail_on_check:

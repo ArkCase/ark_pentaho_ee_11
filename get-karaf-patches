@@ -123,13 +123,12 @@ def manifest(jar_path):
 
 
 def clauses(s):
-    # OSGi header clauses are comma-separated, but version ranges [a,b) contain
-    # commas themselves; split only outside the brackets.
-    out, cur, inb = [], '', False
+    # OSGi header clauses are comma-separated, but quoted values contain commas
+    # themselves (version="[a,b)", uses:="c.d,e.f"); split only outside the quotes.
+    out, cur, inq = [], '', False
     for ch in s:
-        if ch == '[': inb = True
-        elif ch == ']': inb = False
-        if ch == ',' and not inb:
+        if ch == '"': inq = not inq
+        if ch == ',' and not inq:
             if cur.strip(): out.append(cur.strip())
             cur = ''
         else:
@@ -138,26 +137,28 @@ def clauses(s):
     return out
 
 
-def parse_range(rng):
-    if not rng:
-        return None
-    m = re.match(r'^\[(.+?),(.+?)([)\]])$', rng)
-    if m:
-        return (vtuple(m.group(1)), vtuple(m.group(2)), m.group(3) == ']')
-    return (vtuple(rng), None, False)
+def vcmp(a, b):
+    """Compare version tuples; missing segments are 0, so 1.2 and 1.2.0 are equal."""
+    n = max(len(a), len(b))
+    a, b = a + (0,) * (n - len(a)), b + (0,) * (n - len(b))
+    return (a > b) - (a < b)
+
+
+def version_attr(clause):
+    """The version attribute of a header clause, not bundle-version and the like."""
+    m = re.search(r';\s*version\s*=\s*"?([^";]+)"?', clause)
+    return m.group(1).strip() if m else None
 
 
 def satisfies(rng, ver):
-    p = parse_range(rng)
-    if p is None:
+    if not rng:
         return True
-    lo, hi, closed = p
+    m = re.match(r'^([\[(])(.+?),(.+?)([)\]])$', rng)
     v = vtuple(ver)
-    if lo and v < lo:
-        return False
-    if hi and (v > hi or (v == hi and not closed)):
-        return False
-    return True
+    if not m:
+        return vcmp(v, vtuple(rng)) >= 0
+    lo, hi = vcmp(v, vtuple(m.group(2))), vcmp(v, vtuple(m.group(3)))
+    return not (lo < 0 or (lo == 0 and m.group(1) == '(') or hi > 0 or (hi == 0 and m.group(4) == ')'))
 
 
 def export_versions(man):
@@ -165,8 +166,7 @@ def export_versions(man):
     out = {}
     for clause in clauses(man.get('Export-Package') or ''):
         pkg = clause.split(';')[0].strip()
-        m = re.search(r'version="([^"]+)"', clause)
-        out[pkg] = m.group(1) if m else ver
+        out[pkg] = version_attr(clause) or ver
     return out
 
 
@@ -174,8 +174,7 @@ def imports_of(man):
     out = []
     for c in clauses(man.get('Import-Package', '')):
         pkg = c.split(';')[0]
-        m = re.search(r'version="([^"]+)"', c)
-        out.append((pkg, m.group(1) if m else None))
+        out.append((pkg, version_attr(c)))
     return out
 
 
