@@ -121,9 +121,10 @@ LABEL ORG="Armedia LLC" \
     IMAGE_SOURCE="https://github.com/ArkCase/ark_pentaho_ee" \
     MAINTAINER="Armedia Devops Team <devops@armedia.com>"
 
-RUN mkdir -p "${HOME_DIR}/.postgresql" && ln -svf "${CA_TRUSTS_PEM}" "${HOME_DIR}/.postgresql/root.crt"
-
-RUN set-java "${JAVA}" && \
+RUN --mount=type=bind,target=/src \
+    mkdir -p "${HOME_DIR}/.postgresql" && \
+    ln -svf "${CA_TRUSTS_PEM}" "${HOME_DIR}/.postgresql/root.crt" && \
+    set-java "${JAVA}" && \
     DEBIAN_FRONTEND=noninteractive \
     apt-get -y install \
         cron \
@@ -134,13 +135,10 @@ RUN set-java "${JAVA}" && \
     mkdir -p "${PENTAHO_HOME}/.pentaho" "${PENTAHO_SERVER}" "${PENTAHO_PDI_HOME}" "${LB_DIR}" && \
     chown -Rvc "${PENTAHO_USER}:${PENTAHO_GROUP}" "${BASE_DIR}" && \
     chmod -Rvc u=rwX,g=rX,o= "${BASE_DIR}" && \
-    chmod ug+s /usr/sbin/cron
-
-COPY --chown=root:root --chmod=0755 entrypoint /
+    chmod ug+s /usr/sbin/cron && \
+    install -o root -g root -m 0755 /src/entrypoint /usr/local/bin
 
 USER "${PENTAHO_USER}"
-
-COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" --chmod=0640 "server.xml" "logging.properties" "catalina.properties" "${PENTAHO_TOMCAT}/conf/"
 
 #
 # Make sure the user's HOME envvar points to the right place
@@ -150,9 +148,10 @@ ENV HOME="${PENTAHO_HOME}"
 ARG CVE_FIX_FLAG="/src/NO-CVE-FIXES"
 
 # Install Pentaho Server & Plugins
-RUN --mount=type=bind,target=/src,id=artifacts \
+RUN --mount=type=bind,target=/src \
     --mount=type=cache,from=pentaho-artifacts,target=/s3,id=artifacts,ro=true \
     --mount=type=secret,uid=${PENTAHO_UID},gid=${PENTAHO_GID},id=mvn_get_auth \
+    install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0640 -t "${PENTAHO_TOMCAT}/conf/" /src/server.xml /src/logging.properties /src/catalina.properties && \
     . /run/secrets/mvn_get_auth && \
     umask 0027 && \
     export PENTAHO_INSTALL="${PENTAHO_HOME}/install" && \
@@ -226,9 +225,7 @@ RUN --mount=type=bind,target=/src,id=artifacts \
     done && \
     find "${BASE_DIR}" -type f -name "mssql-jdbc-*.jar" -delete && \
     find "${BASE_DIR}" -type f -name "ojdbc*.jar" -delete && \
-    rm -rvf "${PENTAHO_INSTALL}"
-
-RUN umask 0027 && \
+    rm -rvf "${PENTAHO_INSTALL}" && \
     curl -L --fail "${LB_SRC}" | tar -C "${LB_DIR}" -xzvf - && \
     cd "${LB_DIR}" && \
     rm -fv \
@@ -242,10 +239,7 @@ RUN umask 0027 && \
         "${PENTAHO_TOMCAT}/lib"/postgresql-*.jar \
         "internal/lib" && \
     chown -Rvc "${PENTAHO_USER}:${PENTAHO_GROUP}" "${LB_DIR}" && \
-    chmod -Rvc u=rwX,g=rX,o= "${LB_DIR}"
-
-# This is grandfathered in ... unsure why this is done
-RUN umask 0027 && \
+    chmod -Rvc u=rwX,g=rX,o= "${LB_DIR}" && \
     export MANTLE="${PENTAHO_TOMCAT}/webapps/pentaho/mantle" && \
     cp -rf "${MANTLE}/home/properties" "${MANTLE}" && \
     cp -rf "${MANTLE}/home/content" "${MANTLE}" && \
@@ -254,20 +248,19 @@ RUN umask 0027 && \
     cp -rf "${MANTLE}/home/images" "${MANTLE}/images" && \
     cp -rf "${MANTLE}/browser/lib" "${MANTLE}" && \
     cp -rf "${MANTLE}/browser/css/browser.css" "${MANTLE}/css" && \
-    cp -rf "${MANTLE}/browser"/* "${MANTLE}"
-
-COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" --chmod=0755 "start-pentaho.sh" "clean-karaf" "${PENTAHO_SERVER}/"
-COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" --chmod=0644 repository.spring.xml "${PENTAHO_SERVER}/pentaho-solutions/system/"
-COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" --chmod=0644 liquibase.properties "${LB_DIR}/"
-COPY --chown="${PENTAHO_USER}:${PENTAHO_GROUP}" "sql/${PENTAHO_VERSION}" "${LB_DIR}/pentaho/"
-
-RUN --mount=type=bind,target=/src \
+    cp -rf "${MANTLE}/browser"/* "${MANTLE}" && \
+    install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0755 -t "${PENTAHO_SERVER}/" "/src/start-pentaho.sh" "/src/clean-karaf" && \
+    install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0644 -t "${PENTAHO_SERVER}/pentaho-solutions/system/" "/src/repository.spring.xml" && \
+    install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0644 -t "${LB_DIR}/" "/src/liquibase.properties" && \
+    mkdir -p "${LB_DIR}/pentaho" && \
+    ( tar -cf - /src/sql ) | tar --strip-components=2 -C "${LB_DIR}/pentaho" -xvf - && \
     [ -f "${CVE_FIX_FLAG}" ] || apply-fixes /src/CVE
 
 # This is for STIG compliance
 USER root
 RUN chown root "${PENTAHO_SERVER}" && \
     chmod go-w "${PENTAHO_SERVER}"
+
 USER "${PENTAHO_USER}"
 
 ENV PATH="${PENTAHO_SERVER}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -275,4 +268,3 @@ ENV LD_LIBRARY_PATH="${PENTAHO_TOMCAT}/lib"
 
 EXPOSE 8080
 WORKDIR "${PENTAHO_HOME}"
-ENTRYPOINT [ "/entrypoint" ]
