@@ -253,7 +253,7 @@ RUN --mount=type=bind,target=/src \
     install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0644 -t "${PENTAHO_SERVER}/pentaho-solutions/system/" "/src/repository.spring.xml" && \
     install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0644 -t "${LB_DIR}/" "/src/liquibase.properties" && \
     mkdir -p "${LB_DIR}/pentaho" && \
-    ( tar -cf - /src/sql ) | tar --strip-components=2 -C "${LB_DIR}/pentaho" -xvf - && \
+    ( tar -cf - "/src/sql/${PENTAHO_VERSION}" ) | tar --strip-components=3 -C "${LB_DIR}/pentaho" -xvf - && \
     [ -f "${CVE_FIX_FLAG}" ] || apply-fixes /src/CVE
 
 # This is for STIG compliance
