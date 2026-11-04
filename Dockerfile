@@ -149,7 +149,7 @@ ARG CVE_FIX_FLAG="/src/NO-CVE-FIXES"
 
 # Install Pentaho Server & Plugins
 RUN --mount=type=bind,target=/src \
-    --mount=type=cache,from=pentaho-artifacts,target=/s3,id=artifacts,ro=true \
+    --mount=type=bind,from=pentaho-artifacts,target=/s3,id=artifacts,ro=true \
     --mount=type=secret,uid=${PENTAHO_UID},gid=${PENTAHO_GID},id=mvn_get_auth \
     install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0640 -t "${PENTAHO_TOMCAT}/conf/" /src/server.xml /src/logging.properties /src/catalina.properties && \
     . /run/secrets/mvn_get_auth && \
