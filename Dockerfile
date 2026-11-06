@@ -121,25 +121,6 @@ LABEL ORG="Armedia LLC" \
     IMAGE_SOURCE="https://github.com/ArkCase/ark_pentaho_ee" \
     MAINTAINER="Armedia Devops Team <devops@armedia.com>"
 
-RUN --mount=type=bind,target=/src \
-    mkdir -p "${HOME_DIR}/.postgresql" && \
-    ln -svf "${CA_TRUSTS_PEM}" "${HOME_DIR}/.postgresql/root.crt" && \
-    set-java "${JAVA}" && \
-    DEBIAN_FRONTEND=noninteractive \
-    apt-get -y install \
-        cron \
-      && \
-    apt-get clean && \
-    groupadd --system --gid "${PENTAHO_GID}" "${PENTAHO_GROUP}" && \ 
-    useradd --system --uid "${PENTAHO_UID}" --gid "${PENTAHO_GID}" --groups "${ACM_GROUP}" --create-home --home-dir "${PENTAHO_HOME}" "${PENTAHO_USER}" && \ 
-    mkdir -p "${PENTAHO_HOME}/.pentaho" "${PENTAHO_SERVER}" "${PENTAHO_PDI_HOME}" "${LB_DIR}" && \
-    chown -Rvc "${PENTAHO_USER}:${PENTAHO_GROUP}" "${BASE_DIR}" && \
-    chmod -Rvc u=rwX,g=rX,o= "${BASE_DIR}" && \
-    chmod ug+s /usr/sbin/cron && \
-    install -o root -g root -m 0755 /src/entrypoint /usr/local/bin
-
-USER "${PENTAHO_USER}"
-
 #
 # Make sure the user's HOME envvar points to the right place
 #
@@ -147,13 +128,36 @@ ENV HOME="${PENTAHO_HOME}"
 
 ARG CVE_FIX_FLAG="/src/NO-CVE-FIXES"
 
-# Install Pentaho Server & Plugins
+#
+# Everything is installed as root, and the ownership is set explicitly at the end:
+# pentaho owns its own trees, and whatever this build adds into Tomcat gets Tomcat's
+# ownership and modes (tomcat:tomcat, no world access), so pentaho reads it through
+# its membership in TOMCAT_GROUP and Tomcat's own files are never touched. The JDBC
+# drivers are hard-linked from Tomcat's lib into PDI's and Liquibase's, so they end
+# up with Tomcat's ownership in all three places.
+#
 RUN --mount=type=bind,target=/src \
     --mount=type=bind,from=pentaho-artifacts,target=/s3,id=artifacts,ro=true \
-    --mount=type=secret,uid=${PENTAHO_UID},gid=${PENTAHO_GID},id=mvn_get_auth \
-    install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0640 -t "${PENTAHO_TOMCAT}/conf/" /src/server.xml /src/logging.properties /src/catalina.properties && \
-    . /run/secrets/mvn_get_auth && \
+    --mount=type=secret,id=mvn_get_auth \
+    set-java "${JAVA}" && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive \
+    apt-get -y install \
+        cron \
+      && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    chmod ug+s /usr/sbin/cron && \
+    install -o root -g root -m 0755 /src/entrypoint /usr/local/bin && \
+    install-to-tomcat /src/server.xml /src/logging.properties /src/catalina.properties conf && \
+    ( umask 0027 && mkdir -p "${HOME_DIR}/.postgresql" ) && \
+    ln -svf "${CA_TRUSTS_PEM}" "${HOME_DIR}/.postgresql/root.crt" && \
+    groupadd --system --gid "${PENTAHO_GID}" "${PENTAHO_GROUP}" && \
+    useradd --system --uid "${PENTAHO_UID}" --gid "${PENTAHO_GID}" --groups "${ACM_GROUP},${TOMCAT_GROUP}" --create-home --home-dir "${PENTAHO_HOME}" "${PENTAHO_USER}" && \
     umask 0027 && \
+    mkdir -p "${PENTAHO_HOME}/.pentaho" "${PENTAHO_SERVER}" "${PENTAHO_PDI_HOME}" "${LB_DIR}" && \
+    TOMCAT_MARKER="$(mktemp)" && \
+    . /run/secrets/mvn_get_auth && \
     export PENTAHO_INSTALL="${PENTAHO_HOME}/install" && \
     mkdir -p "${PENTAHO_INSTALL}" && \
     export SRC_DIR="${PENTAHO_INSTALL}/pentaho-server-manual-ee-${PENTAHO_SERVER_EE}" && \
@@ -202,7 +206,7 @@ RUN --mount=type=bind,target=/src \
     find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" -type f -name 'hsqldb-*.jar' -delete && \
     unzip "/s3/artifacts/pentaho-server-ee-${PENTAHO_SERVER_EE}.zip" "pentaho-server/tomcat/lib/*.jar" -d "${PENTAHO_INSTALL}" && \
     ( cd "${PENTAHO_INSTALL}/pentaho-server/tomcat/lib" && cp -vf "pentaho-tomcat-logs.jar" commons-logging-*.jar "${PENTAHO_TOMCAT}/lib" ) && \
-    chmod -Rvc o-rwx "${PENTAHO_HOME}" "${PENTAHO_TOMCAT}" "${PENTAHO_PDI_HOME}" && \
+    chmod -Rvc o-rwx "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" && \
     cp "${PENTAHO_SERVER}/pentaho-solutions/native-lib/linux/x86_64"/* "${PENTAHO_TOMCAT}/lib" && \
     xmlstarlet ed -L -P \
         --update '/web-app/context-param[param-name/text() = "solution-path"]/param-value' --value "${PENTAHO_SERVER}/pentaho-solutions" \
@@ -238,7 +242,6 @@ RUN --mount=type=bind,target=/src \
         "${PENTAHO_TOMCAT}/lib"/mysql-legacy-driver-*.jar \
         "${PENTAHO_TOMCAT}/lib"/postgresql-*.jar \
         "internal/lib" && \
-    chown -Rvc "${PENTAHO_USER}:${PENTAHO_GROUP}" "${LB_DIR}" && \
     chmod -Rvc u=rwX,g=rX,o= "${LB_DIR}" && \
     export MANTLE="${PENTAHO_TOMCAT}/webapps/pentaho/mantle" && \
     cp -rf "${MANTLE}/home/properties" "${MANTLE}" && \
@@ -253,13 +256,17 @@ RUN --mount=type=bind,target=/src \
     install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0644 -t "${PENTAHO_SERVER}/pentaho-solutions/system/" "/src/repository.spring.xml" && \
     install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0644 -t "${LB_DIR}/" "/src/liquibase.properties" && \
     mkdir -p "${LB_DIR}/pentaho" && \
-    ( tar -cf - "/src/sql/${PENTAHO_VERSION}" ) | tar --strip-components=3 -C "${LB_DIR}/pentaho" -xvf - && \
-    [ -f "${CVE_FIX_FLAG}" ] || apply-fixes /src/CVE
-
-# This is for STIG compliance
-USER root
-RUN chown root "${PENTAHO_SERVER}" && \
-    chmod go-w "${PENTAHO_SERVER}"
+    ( tar --mode=a-x,u=rwX,g=rX,o= -cf - "/src/sql/${PENTAHO_VERSION}" ) | tar --strip-components=3 -C "${LB_DIR}/pentaho" -xvf - && \
+    { [ -f "${CVE_FIX_FLAG}" ] || apply-fixes /src/CVE ; } && \
+    chown -Rvc "${PENTAHO_USER}:${PENTAHO_GROUP}" "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" "${LB_DIR}" "${CONF_DIR}" "${DATA_DIR}" "${LOGS_DIR}" "${TEMP_DIR}" && \
+    chmod -Rvc u=rwX,g=rX,o= "${CONF_DIR}" "${DATA_DIR}" "${LOGS_DIR}" "${TEMP_DIR}" && \
+    chown -vc "${PENTAHO_USER}:${PENTAHO_GROUP}" "${BASE_DIR}" && \
+    chmod -vc u=rwx,g=rx,o= "${BASE_DIR}" && \
+    chown -vc root "${PENTAHO_SERVER}" && \
+    chmod -vc go-w "${PENTAHO_SERVER}" && \
+    find "${TOMCAT_HOME}" -mindepth 2 -cnewer "${TOMCAT_MARKER}" -exec chown -hvc "${TOMCAT_USER}:${TOMCAT_GROUP}" {} + && \
+    find "${TOMCAT_HOME}" -mindepth 2 -cnewer "${TOMCAT_MARKER}" ! -type l -exec chmod -vc u=rwX,g=rX,o= {} + && \
+    rm -f "${TOMCAT_MARKER}"
 
 USER "${PENTAHO_USER}"
 
