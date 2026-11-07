@@ -129,16 +129,9 @@ ENV HOME="${PENTAHO_HOME}"
 ARG CVE_FIX_FLAG="/src/NO-CVE-FIXES"
 
 #
-# Everything is installed as root, and the ownership is set explicitly at the end:
-# pentaho owns its own trees, and whatever this build adds into Tomcat gets Tomcat's
-# ownership and modes (tomcat:tomcat, no world access), so pentaho reads it through
-# its membership in TOMCAT_GROUP and Tomcat's own files are never touched. The JDBC
-# drivers are hard-linked from Tomcat's lib into PDI's and Liquibase's, so they end
-# up with Tomcat's ownership in all three places.
+# System setup: Java, cron, the entrypoint, Tomcat's configuration, and the pentaho user
 #
 RUN --mount=type=bind,target=/src \
-    --mount=type=bind,from=pentaho-artifacts,target=/s3,id=artifacts,ro=true \
-    --mount=type=secret,id=mvn_get_auth \
     set-java "${JAVA}" && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
@@ -155,11 +148,32 @@ RUN --mount=type=bind,target=/src \
     groupadd --system --gid "${PENTAHO_GID}" "${PENTAHO_GROUP}" && \
     useradd --system --uid "${PENTAHO_UID}" --gid "${PENTAHO_GID}" --groups "${ACM_GROUP},${TOMCAT_GROUP}" --create-home --home-dir "${PENTAHO_HOME}" "${PENTAHO_USER}" && \
     umask 0027 && \
-    mkdir -p "${PENTAHO_HOME}/.pentaho" "${PENTAHO_SERVER}" "${PENTAHO_PDI_HOME}" "${LB_DIR}" && \
-    TOMCAT_MARKER="$(mktemp)" && \
-    . /run/secrets/mvn_get_auth && \
+    mkdir -p "${PENTAHO_HOME}/.pentaho" && \
+    chown -Rvc "${PENTAHO_USER}:${PENTAHO_GROUP}" "${PENTAHO_HOME}" "${CONF_DIR}" "${DATA_DIR}" "${LOGS_DIR}" "${TEMP_DIR}" && \
+    chmod -Rvc u=rwX,g=rX,o= "${CONF_DIR}" "${DATA_DIR}" "${LOGS_DIR}" "${TEMP_DIR}" && \
+    chown -vc "${PENTAHO_USER}:${PENTAHO_GROUP}" "${BASE_DIR}" && \
+    chmod -vc u=rwx,g=rx,o= "${BASE_DIR}"
+
+#
+# The Pentaho installation, from the pinned vendor archives and this version's SQL changesets ONLY. This layer is
+# byte-identical from one build to the next (and is thus reused) until those change, as long as everything in it is
+# deterministic:
+#
+#   * nothing here may download "latest" versions, apply CVE fixes, or depend on the date (that goes in the next step)
+#   * ownership and modes are only set on what this step creates (touching anything from earlier layers would copy it
+#     into this one)
+#   * every entry keeps its archive's timestamp (saved right after extraction, and restored at the end), and anything
+#     created here gets the archives' newest one, as do the directories from earlier layers that this step modifies
+#   * the SQL changesets (adapted from the vendor's create_quartz scripts) take the timestamp of the vendor's
+#     create_quartz_postgresql.sql, since their checkout's timestamps vary from one build to the next
+#
+RUN --mount=type=bind,target=/src \
+    --mount=type=bind,from=pentaho-artifacts,target=/s3,id=artifacts,ro=true \
+    umask 0027 && \
+    MARKER="$(mktemp -p /tmp)" && \
+    sleep 1 && \
     export PENTAHO_INSTALL="${PENTAHO_HOME}/install" && \
-    mkdir -p "${PENTAHO_INSTALL}" && \
+    mkdir -p "${PENTAHO_INSTALL}" "${PENTAHO_SERVER}" "${PENTAHO_PDI_HOME}" && \
     export SRC_DIR="${PENTAHO_INSTALL}/pentaho-server-manual-ee-${PENTAHO_SERVER_EE}" && \
     unzip "/s3/artifacts/pentaho-server-manual-ee-${PENTAHO_SERVER_EE}.zip" -d "${PENTAHO_INSTALL}" && \
     unzip "${SRC_DIR}/pentaho-solutions.zip" -d "${PENTAHO_SERVER}" && \
@@ -179,34 +193,21 @@ RUN --mount=type=bind,target=/src \
     unzip "/s3/artifacts/pdi-ee-client-${PDI_EE_CLIENT}.zip" -d "${PENTAHO_PDI_HOME}" && \
     unzip "/s3/artifacts/pentaho-server-ee-${PENTAHO_SERVER_EE}.zip" "pentaho-server/*.sh" -x "pentaho-server/*/*" -d "${PENTAHO_HOME}" && \
     unzip "/s3/artifacts/pentaho-server-ee-${PENTAHO_SERVER_EE}.zip" "pentaho-server/tomcat/webapps/sw-style/*" -d "${PENTAHO_HOME}" && \
+    STAMP="$(find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" "${TOMCAT_HOME}" -cnewer "${MARKER}" -type f -printf '%T@\n' | sort -n | tail -1 | cut -d. -f1)" && \
+    [ -n "${STAMP}" ] && \
+    TIMES="$(mktemp -p /tmp)" && \
+    find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" "${TOMCAT_HOME}" -cnewer "${MARKER}" -printf '%T@\t%p\n' > "${TIMES}" && \
     find "${PENTAHO_SYSTEM}/default-content" -type f -delete && \
     sed -i 's;docbase=";docBase=";g' "${PENTAHO_TOMCAT}/webapps/pentaho/META-INF/context.xml" && \
     find "${PENTAHO_SERVER}" -type f -iname '*.sh' -exec chmod u=rwx,g=rx,o= '{}' ';' && \
     rm -f "${PENTAHO_SERVER}/promptuser.sh" "${PENTAHO_SERVER}"/*.bat "${PENTAHO_SERVER}"/*.js && \
     rm -fv \
-        "${PENTAHO_TOMCAT}/lib"/mysql-connector-java-*.jar \
-        "${PENTAHO_TOMCAT}/lib"/postgresql-*.jar \
-      && \
-    mvn-get "${DISRUPTOR_SRC}" "${PENTAHO_TOMCAT}/lib" && \
-    mvn-get "${MARIADB_DRIVER_SRC}" "${PENTAHO_TOMCAT}/lib" && \
-    mvn-get "${MYSQL_DRIVER_SRC}" "${PENTAHO_TOMCAT}/lib" && \
-    mvn-get "${MYSQL_LEGACY_DRIVER_SRC}" "${ARKCASE_MVN_REPO}" "${PENTAHO_TOMCAT}/lib" && \
-    mvn-get "${POSTGRES_DRIVER_SRC}" "${PENTAHO_TOMCAT}/lib" && \
-    mvn-get "${ARKCASE_PREAUTH_SRC}" "${ARKCASE_MVN_REPO}" "${PENTAHO_TOMCAT}/webapps/pentaho/WEB-INF/lib" && \
-    rm -fv \
         "${PENTAHO_PDI_LIB}"/mysql-connector-java-*.jar \
         "${PENTAHO_PDI_LIB}"/postgresql-*.jar \
       && \
-    ln -vf \
-        "${PENTAHO_TOMCAT}/lib"/mariadb-java-client-*.jar \
-        "${PENTAHO_TOMCAT}/lib"/mysql-connector-j-*.jar \
-        "${PENTAHO_TOMCAT}/lib"/mysql-legacy-driver-*.jar \
-        "${PENTAHO_TOMCAT}/lib"/postgresql-*.jar \
-        "${PENTAHO_PDI_LIB}" && \
     find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" -type f -name 'hsqldb-*.jar' -delete && \
     unzip "/s3/artifacts/pentaho-server-ee-${PENTAHO_SERVER_EE}.zip" "pentaho-server/tomcat/lib/*.jar" -d "${PENTAHO_INSTALL}" && \
     ( cd "${PENTAHO_INSTALL}/pentaho-server/tomcat/lib" && cp -vf "pentaho-tomcat-logs.jar" commons-logging-*.jar "${PENTAHO_TOMCAT}/lib" ) && \
-    chmod -Rvc o-rwx "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" && \
     cp "${PENTAHO_SERVER}/pentaho-solutions/native-lib/linux/x86_64"/* "${PENTAHO_TOMCAT}/lib" && \
     xmlstarlet ed -L -P \
         --update '/web-app/context-param[param-name/text() = "solution-path"]/param-value' --value "${PENTAHO_SERVER}/pentaho-solutions" \
@@ -230,19 +231,6 @@ RUN --mount=type=bind,target=/src \
     find "${BASE_DIR}" -type f -name "mssql-jdbc-*.jar" -delete && \
     find "${BASE_DIR}" -type f -name "ojdbc*.jar" -delete && \
     rm -rvf "${PENTAHO_INSTALL}" && \
-    curl -L --fail "${LB_SRC}" | tar -C "${LB_DIR}" -xzvf - && \
-    cd "${LB_DIR}" && \
-    rm -fv \
-        internal/lib/mariadb-java-client.jar \
-        internal/lib/postgresql.jar \
-      && \
-    ln -vf \
-        "${PENTAHO_TOMCAT}/lib"/mariadb-java-client-*.jar \
-        "${PENTAHO_TOMCAT}/lib"/mysql-connector-j-*.jar \
-        "${PENTAHO_TOMCAT}/lib"/mysql-legacy-driver-*.jar \
-        "${PENTAHO_TOMCAT}/lib"/postgresql-*.jar \
-        "internal/lib" && \
-    chmod -Rvc u=rwX,g=rX,o= "${LB_DIR}" && \
     export MANTLE="${PENTAHO_TOMCAT}/webapps/pentaho/mantle" && \
     cp -rf "${MANTLE}/home/properties" "${MANTLE}" && \
     cp -rf "${MANTLE}/home/content" "${MANTLE}" && \
@@ -252,21 +240,76 @@ RUN --mount=type=bind,target=/src \
     cp -rf "${MANTLE}/browser/lib" "${MANTLE}" && \
     cp -rf "${MANTLE}/browser/css/browser.css" "${MANTLE}/css" && \
     cp -rf "${MANTLE}/browser"/* "${MANTLE}" && \
+    [ -d "/src/sql/${PENTAHO_VERSION}" ] && \
+    export SQL_TIME_REF="${PENTAHO_SERVER}/data/postgresql/create_quartz_postgresql.sql" && \
+    [ -f "${SQL_TIME_REF}" ] && \
+    mkdir -p "${LB_DIR}/pentaho" && \
+    ( tar --mode=a-x,u=rwX,g=rX,o= --mtime="${SQL_TIME_REF}" -cf - "/src/sql/${PENTAHO_VERSION}" ) | tar --strip-components=3 -C "${LB_DIR}/pentaho" -xvf - && \
+    find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" "${LB_DIR}" -cnewer "${MARKER}" ! -type l -perm /o=rwx -exec chmod -c o-rwx '{}' + && \
+    find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" "${LB_DIR}" -cnewer "${MARKER}" -exec chown -hc "${PENTAHO_USER}:${PENTAHO_GROUP}" '{}' + && \
+    chown -vc root "${PENTAHO_SERVER}" && \
+    chmod -vc go-w "${PENTAHO_SERVER}" && \
+    find "${TOMCAT_HOME}" -mindepth 2 -cnewer "${MARKER}" -exec chown -hc "${TOMCAT_USER}:${TOMCAT_GROUP}" '{}' + && \
+    find "${TOMCAT_HOME}" -mindepth 2 -cnewer "${MARKER}" ! -type l -exec chmod -c u=rwX,g=rX,o= '{}' + && \
+    while IFS="$(printf '\t')" read -r T P ; do \
+        [ -e "${P}" ] || [ -L "${P}" ] || continue ; \
+        touch -h -d "@${T}" "${P}" ; \
+    done < "${TIMES}" && \
+    find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" "${LB_DIR}" "${TOMCAT_HOME}" -cnewer "${MARKER}" -newermt "@${STAMP}" -exec touch -h -d "@${STAMP}" '{}' + && \
+    rm -f "${MARKER}" "${TIMES}" && \
+    touch -h -d "@${STAMP}" "${BASE_DIR}" /tmp
+
+#
+# Everything that changes more often: the JDBC drivers (hard-linked into PDI and Liquibase), the preauth module,
+# Liquibase, the scripts and configuration from this repository, and the CVE fixes. Whatever this step adds or replaces
+# gets its final ownership and modes here (and only that, so nothing from the static layer is copied into this one)
+#
+RUN --mount=type=bind,target=/src \
+    --mount=type=secret,id=mvn_get_auth \
+    . /run/secrets/mvn_get_auth && \
+    umask 0027 && \
+    MARKER="$(mktemp -p /tmp)" && \
+    sleep 1 && \
+    rm -fv \
+        "${PENTAHO_TOMCAT}/lib"/mysql-connector-java-*.jar \
+        "${PENTAHO_TOMCAT}/lib"/postgresql-*.jar \
+      && \
+    mvn-get "${DISRUPTOR_SRC}" "${PENTAHO_TOMCAT}/lib" && \
+    mvn-get "${MARIADB_DRIVER_SRC}" "${PENTAHO_TOMCAT}/lib" && \
+    mvn-get "${MYSQL_DRIVER_SRC}" "${PENTAHO_TOMCAT}/lib" && \
+    mvn-get "${MYSQL_LEGACY_DRIVER_SRC}" "${ARKCASE_MVN_REPO}" "${PENTAHO_TOMCAT}/lib" && \
+    mvn-get "${POSTGRES_DRIVER_SRC}" "${PENTAHO_TOMCAT}/lib" && \
+    mvn-get "${ARKCASE_PREAUTH_SRC}" "${ARKCASE_MVN_REPO}" "${PENTAHO_TOMCAT}/webapps/pentaho/WEB-INF/lib" && \
+    ln -vf \
+        "${PENTAHO_TOMCAT}/lib"/mariadb-java-client-*.jar \
+        "${PENTAHO_TOMCAT}/lib"/mysql-connector-j-*.jar \
+        "${PENTAHO_TOMCAT}/lib"/mysql-legacy-driver-*.jar \
+        "${PENTAHO_TOMCAT}/lib"/postgresql-*.jar \
+        "${PENTAHO_PDI_LIB}" && \
+    mkdir -p "${LB_DIR}" && \
+    curl -L --fail "${LB_SRC}" | tar -C "${LB_DIR}" -xzvf - && \
+    rm -fv \
+        "${LB_DIR}/internal/lib/mariadb-java-client.jar" \
+        "${LB_DIR}/internal/lib/postgresql.jar" \
+      && \
+    ln -vf \
+        "${PENTAHO_TOMCAT}/lib"/mariadb-java-client-*.jar \
+        "${PENTAHO_TOMCAT}/lib"/mysql-connector-j-*.jar \
+        "${PENTAHO_TOMCAT}/lib"/mysql-legacy-driver-*.jar \
+        "${PENTAHO_TOMCAT}/lib"/postgresql-*.jar \
+        "${LB_DIR}/internal/lib" && \
+    find "${LB_DIR}" -cnewer "${MARKER}" ! -type l -exec chmod -c u=rwX,g=rX,o= '{}' + && \
     install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0755 -t "${PENTAHO_SERVER}/" "/src/start-pentaho.sh" "/src/clean-karaf" && \
     install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0644 -t "${PENTAHO_SERVER}/pentaho-solutions/system/" "/src/repository.spring.xml" && \
     install -o "${PENTAHO_USER}" -g "${PENTAHO_GROUP}" -m 0644 -t "${LB_DIR}/" "/src/liquibase.properties" && \
-    mkdir -p "${LB_DIR}/pentaho" && \
-    ( tar --mode=a-x,u=rwX,g=rX,o= -cf - "/src/sql/${PENTAHO_VERSION}" ) | tar --strip-components=3 -C "${LB_DIR}/pentaho" -xvf - && \
     { [ -f "${CVE_FIX_FLAG}" ] || apply-fixes /src/CVE ; } && \
-    chown -Rvc "${PENTAHO_USER}:${PENTAHO_GROUP}" "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" "${LB_DIR}" "${CONF_DIR}" "${DATA_DIR}" "${LOGS_DIR}" "${TEMP_DIR}" && \
-    chmod -Rvc u=rwX,g=rX,o= "${CONF_DIR}" "${DATA_DIR}" "${LOGS_DIR}" "${TEMP_DIR}" && \
-    chown -vc "${PENTAHO_USER}:${PENTAHO_GROUP}" "${BASE_DIR}" && \
-    chmod -vc u=rwx,g=rx,o= "${BASE_DIR}" && \
+    find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" -cnewer "${MARKER}" ! -type l -perm /o=rwx -exec chmod -c o-rwx '{}' + && \
+    find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" "${LB_DIR}" -cnewer "${MARKER}" -exec chown -hc "${PENTAHO_USER}:${PENTAHO_GROUP}" '{}' + && \
     chown -vc root "${PENTAHO_SERVER}" && \
     chmod -vc go-w "${PENTAHO_SERVER}" && \
-    find "${TOMCAT_HOME}" -mindepth 2 -cnewer "${TOMCAT_MARKER}" -exec chown -hvc "${TOMCAT_USER}:${TOMCAT_GROUP}" {} + && \
-    find "${TOMCAT_HOME}" -mindepth 2 -cnewer "${TOMCAT_MARKER}" ! -type l -exec chmod -vc u=rwX,g=rX,o= {} + && \
-    rm -f "${TOMCAT_MARKER}"
+    find "${TOMCAT_HOME}" -mindepth 2 -cnewer "${MARKER}" -exec chown -hc "${TOMCAT_USER}:${TOMCAT_GROUP}" '{}' + && \
+    find "${TOMCAT_HOME}" -mindepth 2 -cnewer "${MARKER}" ! -type l -exec chmod -c u=rwX,g=rX,o= '{}' + && \
+    rm -f "${MARKER}"
 
 USER "${PENTAHO_USER}"
 
