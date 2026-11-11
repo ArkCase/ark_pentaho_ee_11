@@ -35,7 +35,7 @@ ARG POSTGRES_DRIVER_SRC="org.postgresql:postgresql:${POSTGRES_DRIVER}"
 
 ARG ARKCASE_MVN_REPO="https://nexus.armedia.com/repository/arkcase"
 ARG ARKCASE_PREAUTH_SPRING="6"
-ARG ARKCASE_PREAUTH_VERSION="1.5.0"
+ARG ARKCASE_PREAUTH_VERSION="1.6.0"
 ARG ARKCASE_PREAUTH_SRC="com.armedia.arkcase.preauth:arkcase-preauth-springsec-v${ARKCASE_PREAUTH_SPRING}:${ARKCASE_PREAUTH_VERSION}:jar"
 
 ARG BASE_REGISTRY="${PUBLIC_REGISTRY}"
@@ -244,7 +244,7 @@ RUN --mount=type=bind,target=/src \
     export SQL_TIME_REF="${PENTAHO_SERVER}/data/postgresql/create_quartz_postgresql.sql" && \
     [ -f "${SQL_TIME_REF}" ] && \
     mkdir -p "${LB_DIR}/pentaho" && \
-    ( tar --mode=a-x,u=rwX,g=rX,o= --mtime="${SQL_TIME_REF}" -cf - "/src/sql/${PENTAHO_VERSION}" ) | tar --strip-components=3 -C "${LB_DIR}/pentaho" -xvf - && \
+    copy-tree -v -m a-x,u=rwX,g=rX,o= -M "${SQL_TIME_REF}" "/src/sql/${PENTAHO_VERSION}/" "${LB_DIR}/pentaho" && \
     find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" "${LB_DIR}" -cnewer "${MARKER}" ! -type l -perm /o=rwx -exec chmod -c o-rwx '{}' + && \
     find "${PENTAHO_HOME}" "${PENTAHO_PDI_HOME}" "${LB_DIR}" -cnewer "${MARKER}" -exec chown -hc "${PENTAHO_USER}:${PENTAHO_GROUP}" '{}' + && \
     chown -vc root "${PENTAHO_SERVER}" && \
