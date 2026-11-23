@@ -44,6 +44,12 @@ ARG BASE_VER="10"
 ARG BASE_VER_PFX=""
 ARG BASE_IMG="${BASE_REGISTRY}/${BASE_REPO}${FIPS}:${BASE_VER_PFX}${BASE_VER}"
 
+ARG ETL_SERVER_REGISTRY="${BASE_REGISTRY}"
+ARG ETL_SERVER_REPO="arkcase/rebuild-etl-server"
+ARG ETL_SERVER_VER="latest"
+ARG ETL_SERVER_VER_PFX="${BASE_VER_PFX}"
+ARG ETL_SERVER_IMG="${ETL_SERVER_REGISTRY}/${ETL_SERVER_REPO}${FIPS}:${ETL_SERVER_VER_PFX}${ETL_SERVER_VER}"
+
 ARG PENTAHO_SERVER_EE="${PENTAHO_VERSION}"
 ARG PAZ_PLUGIN_EE="${PENTAHO_SERVER_EE}"
 ARG PDD_PLUGIN_EE="${PENTAHO_SERVER_EE}"
@@ -71,6 +77,8 @@ RUN --mount=type=secret,id=aws_conf \
     export AWS_SHARED_CREDENTIALS_FILE="/run/secrets/aws_auth" && \
     aws s3 cp --recursive "s3://${S3_BUCKET}/${S3_PATH}" "/artifacts/" --include "*"
 COPY "ROOT.war" "/artifacts/"
+
+FROM "${ETL_SERVER_IMG}" AS etl-server
 
 FROM "${BASE_IMG}"
 
@@ -129,9 +137,10 @@ ENV HOME="${PENTAHO_HOME}"
 ARG CVE_FIX_FLAG="/src/NO-CVE-FIXES"
 
 #
-# System setup: Java, cron, the entrypoint, Tomcat's configuration, and the pentaho user
+# System setup: Java, the entrypoint, the ETL server, Tomcat's configuration, and the pentaho user
 #
 RUN --mount=type=bind,target=/src \
+    --mount=type=bind,from=etl-server,target=/etl,id=etl-server,ro=true \
     set-java "${JAVA}" && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive \
@@ -141,6 +150,7 @@ RUN --mount=type=bind,target=/src \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     chmod ug+s /usr/sbin/cron && \
+    install -o root -g root -m 0755 -t "/usr/local/bin" /etl/* && \
     install -o root -g root -m 0755 /src/entrypoint /usr/local/bin && \
     install-to-tomcat /src/server.xml /src/logging.properties /src/catalina.properties conf && \
     ( umask 0027 && mkdir -p "${HOME_DIR}/.postgresql" ) && \
